@@ -1,0 +1,6 @@
+{
+  "name": "MediMitra",
+  "description": "Your Health. Your Companion. Your Safety. A personal health, wellness tracking, health insight, and emergency assistance platform with smart traffic coordination.",
+  "requestFramePermissions": ["geolocation", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
