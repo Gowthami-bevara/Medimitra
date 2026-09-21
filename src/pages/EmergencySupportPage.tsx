@@ -32,6 +32,7 @@ export const EmergencySupportPage: React.FC = () => {
     editEmergencyContact,
     deleteEmergencyContact,
     userLocation,
+    detectUserLocation,
     user,
     healthProfile,
     language,
@@ -70,11 +71,17 @@ export const EmergencySupportPage: React.FC = () => {
   };
 
   // Generate real Google Maps link and SOS Message
-  const mapsUrl = `https://maps.google.com/?q=${userLocation.lat},${userLocation.lng}`;
+  const hasGps = userLocation.lat != null && userLocation.lng != null;
+  const mapsUrl = hasGps
+    ? `https://maps.google.com/?q=${userLocation.lat},${userLocation.lng}`
+    : 'https://maps.google.com';
+  const coordsStr = hasGps
+    ? `${userLocation.lat!.toFixed(4)}° N, ${userLocation.lng!.toFixed(4)}° E`
+    : 'Awaiting GPS lock';
   const sosMessage = `🚨 EMERGENCY MEDICAL SOS from ${user?.name || 'MediMitra User'} (${user?.phone || ''})!
 I require urgent medical assistance.
 Current Location: ${userLocation.area}, ${userLocation.city}
-Coordinates: ${userLocation.lat.toFixed(4)}° N, ${userLocation.lng.toFixed(4)}° E
+Coordinates: ${coordsStr}
 Live Map Location: ${mapsUrl}
 ${healthProfile?.bloodGroup ? `Blood Group: ${healthProfile.bloodGroup}` : ''}
 ${healthProfile?.chronicConditions ? `Conditions: ${healthProfile.chronicConditions}` : ''}
@@ -206,12 +213,12 @@ Please send help or contact 108 immediately.`;
               </h2>
               <button
                 id="btn-calibrate-gps"
-                onClick={userLocation.detectLocation}
-                disabled={userLocation.isDetecting}
+                onClick={() => detectUserLocation()}
+                disabled={userLocation.trackingStatus === 'requesting'}
                 className="text-xs font-bold text-blue-700 hover:text-blue-900 flex items-center gap-1.5 bg-blue-50 px-3 py-1.5 rounded-xl border border-blue-100 transition-colors"
               >
-                <Compass className={`w-3.5 h-3.5 ${userLocation.isDetecting ? 'animate-spin' : ''}`} />
-                <span>{userLocation.isDetecting ? 'Detecting...' : 'Detect GPS Location'}</span>
+                <Compass className={`w-3.5 h-3.5 ${userLocation.trackingStatus === 'requesting' ? 'animate-spin' : ''}`} />
+                <span>{userLocation.trackingStatus === 'requesting' ? 'Detecting...' : 'Detect GPS Location'}</span>
               </button>
             </div>
 
@@ -220,15 +227,19 @@ Please send help or contact 108 immediately.`;
                 <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
                   Incident Coordinates & Area
                 </span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold">
-                  GPS Ready
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                  userLocation.isGpsDetected
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : 'bg-amber-100 text-amber-800'
+                }`}>
+                  {userLocation.isGpsDetected ? 'GPS Ready' : 'Acquiring GPS'}
                 </span>
               </div>
               <div className="font-display font-bold text-sm sm:text-base text-slate-900">
                 {userLocation.area}, {userLocation.city}
               </div>
               <div className="font-mono text-xs text-slate-600">
-                Lat: {userLocation.lat.toFixed(4)}° N, Lng: {userLocation.lng.toFixed(4)}° E
+                Lat: {userLocation.lat != null ? `${userLocation.lat.toFixed(4)}° N` : 'Pending'}, Lng: {userLocation.lng != null ? `${userLocation.lng.toFixed(4)}° E` : 'Pending'}
               </div>
               <div className="pt-1 flex items-center gap-2">
                 <a

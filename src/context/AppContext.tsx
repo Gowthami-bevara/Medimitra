@@ -11,9 +11,11 @@ import {
   Doctor,
   Hospital,
   UserLocationState,
+  GpsTrackingStatus,
   EmergencyContact,
   MedicineReminderSettings,
 } from '../types';
+import { getApiUrl } from '../utils/api';
 import {
   SEED_PROFILE,
   SEED_TODAY_LOG,
@@ -26,8 +28,8 @@ import {
 } from '../data/seedData';
 import { HealthPredictionService } from '../services/healthPredictionService';
 import {
-  getNearbyDoctorsWithLiveDistance,
   getNearbyHospitalsWithLiveDistance,
+  calculateDistanceKm,
 } from '../utils/locationService';
 
 interface AppContextType {
@@ -38,6 +40,16 @@ interface AppContextType {
   medicines: MedicineItem[];
   symptoms: SymptomReport[];
   doctors: Doctor[];
+  nearbyDoctorsLoading: boolean;
+  nearbyDoctorsError: string | null;
+  nearbyDoctorsConfigRequired: {
+    apiRequired: string;
+    envVariable: string;
+    message: string;
+    osmAvailable?: boolean;
+    userCoordinates?: { lat: number; lng: number };
+  } | null;
+  nearbyDoctorsProvider: 'google' | 'osm';
   hospitals: Hospital[];
   prediction: HealthPredictionResult;
   language: AppLanguage;
@@ -60,6 +72,9 @@ interface AppContextType {
   detectUserLocation: () => Promise<UserLocationState>;
   startLiveLocationTracking: () => void;
   stopLiveLocationTracking: () => void;
+  setNearbyDoctorsProvider: (provider: 'google' | 'osm') => void;
+  fetchNearbyDoctors: (lat?: number, lng?: number, provider?: 'google' | 'osm', force?: boolean) => Promise<void>;
+  refreshNearbyDoctors: () => Promise<void>;
   login: (email: string, name?: string) => void;
   register: (email: string, name: string) => void;
   registerWithPhone: (phone: string) => void;
@@ -179,45 +194,135 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [symptoms, setSymptoms] = useState<SymptomReport[]>([]);
 
-  // User Location State (Default: Hyderabad, Telangana)
+  // User Location State - Real-time device GPS (No hard-coded or fake coordinates)
   const [userLocation, setUserLocation] = useState<UserLocationState>(() => {
-    try {
-      const saved = localStorage.getItem('medimitra_location');
-      return saved ? JSON.parse(saved) : {
-        city: 'Hyderabad',
-        area: 'HITEC City & Banjara Hills, Hyderabad, Telangana',
-        lat: 17.4482,
-        lng: 78.3915,
-        isGpsDetected: false,
-        isTrackingActive: false,
-        lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
-    } catch {
-      return {
-        city: 'Hyderabad',
-        area: 'HITEC City & Banjara Hills, Hyderabad, Telangana',
-        lat: 17.4482,
-        lng: 78.3915,
-        isGpsDetected: false,
-        isTrackingActive: false,
-        lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
-    }
+    return {
+      city: 'Awaiting Location',
+      area: 'Device GPS not yet calibrated',
+      lat: null,
+      lng: null,
+      accuracy: null,
+      isGpsDetected: false,
+      isTrackingActive: false,
+      trackingStatus: 'idle',
+      trackingError: null,
+      permissionDenied: false,
+      lastUpdated: undefined,
+    };
   });
 
   // Dynamic Doctors and Hospitals computed from user coordinates
-  const [doctors, setDoctors] = useState<Doctor[]>(() =>
-    getNearbyDoctorsWithLiveDistance(SEED_DOCTORS, userLocation)
-  );
+  const [doctors, setDoctors] = useState<Doctor[]>([]);
+  const [nearbyDoctorsLoading, setNearbyDoctorsLoading] = useState<boolean>(false);
+  const [nearbyDoctorsError, setNearbyDoctorsError] = useState<string | null>(null);
+  const [nearbyDoctorsConfigRequired, setNearbyDoctorsConfigRequired] = useState<{
+    apiRequired: string;
+    envVariable: string;
+    message: string;
+    osmAvailable?: boolean;
+    userCoordinates?: { lat: number; lng: number };
+  } | null>(null);
+  const [nearbyDoctorsProvider, setNearbyDoctorsProvider] = useState<'google' | 'osm'>('google');
+
   const [hospitals, setHospitals] = useState<Hospital[]>(() =>
     getNearbyHospitalsWithLiveDistance(SEED_HOSPITALS, userLocation)
   );
 
-  // Recalculate nearby distances whenever user GPS location updates
+  const lastSearchedCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
+  const lastSearchedProviderRef = useRef<'google' | 'osm'>('google');
+
+  const fetchNearbyDoctors = async (
+    targetLat?: number | null,
+    targetLng?: number | null,
+    provider?: 'google' | 'osm',
+    force = false
+  ) => {
+    const lat = targetLat ?? userLocation.lat;
+    const lng = targetLng ?? userLocation.lng;
+
+    if (lat == null || lng == null || typeof lat !== 'number' || typeof lng !== 'number' || isNaN(lat) || isNaN(lng)) {
+      return;
+    }
+
+    const activeProvider = provider ?? nearbyDoctorsProvider;
+
+    // Avoid duplicate requests if moved <300m and provider didn't change
+    if (!force && lastSearchedCoordsRef.current && lastSearchedProviderRef.current === activeProvider) {
+      const dist = calculateDistanceKm(lastSearchedCoordsRef.current.lat, lastSearchedCoordsRef.current.lng, lat, lng);
+      if (dist < 0.3) {
+        return;
+      }
+    }
+
+    setNearbyDoctorsLoading(true);
+    setNearbyDoctorsError(null);
+
+    try {
+      const params = new URLSearchParams({
+        lat: lat.toString(),
+        lng: lng.toString(),
+        radius: '5000',
+        provider: activeProvider,
+      });
+
+      const res = await fetch(getApiUrl(`/api/places/nearby-doctors?${params.toString()}`));
+      const data = await res.json();
+
+      if (data.success && Array.isArray(data.data)) {
+        setDoctors(data.data);
+        setNearbyDoctorsConfigRequired(null);
+        lastSearchedCoordsRef.current = { lat, lng };
+        lastSearchedProviderRef.current = activeProvider;
+      } else if (data.error === 'API_KEY_REQUIRED') {
+        // STRICTLY DO NOT SHOW FAKE DOCTORS! Tell the user what API & key are required.
+        setDoctors([]);
+        setNearbyDoctorsConfigRequired({
+          apiRequired: data.apiRequired || 'Google Places API (New) / Google Maps Platform',
+          envVariable: data.envVariable || 'GOOGLE_MAPS_API_KEY',
+          message: data.message || 'Google Places API key is required to query live nearby doctors.',
+          osmAvailable: Boolean(data.osmAvailable),
+          userCoordinates: data.userCoordinates || { lat, lng },
+        });
+        lastSearchedCoordsRef.current = { lat, lng };
+        lastSearchedProviderRef.current = activeProvider;
+      } else {
+        setDoctors([]);
+        setNearbyDoctorsError(data.message || data.error || 'Failed to retrieve nearby healthcare providers.');
+      }
+    } catch (err: any) {
+      console.error('Error fetching nearby doctors:', err);
+      setDoctors([]);
+      setNearbyDoctorsError('Network error connecting to nearby healthcare provider API.');
+    } finally {
+      setNearbyDoctorsLoading(false);
+    }
+  };
+
+  const refreshNearbyDoctors = async () => {
+    if (userLocation.lat != null && userLocation.lng != null) {
+      await fetchNearbyDoctors(userLocation.lat, userLocation.lng, nearbyDoctorsProvider, true);
+    } else {
+      const freshLoc = await detectUserLocation();
+      if (freshLoc.lat != null && freshLoc.lng != null) {
+        await fetchNearbyDoctors(freshLoc.lat, freshLoc.lng, nearbyDoctorsProvider, true);
+      }
+    }
+  };
+
+  // Re-fetch when user GPS coordinates change significantly (>= 300m) or on first coordinate fix
   useEffect(() => {
-    setDoctors(getNearbyDoctorsWithLiveDistance(SEED_DOCTORS, userLocation));
+    if (userLocation.lat != null && userLocation.lng != null && userLocation.isGpsDetected) {
+      if (!lastSearchedCoordsRef.current) {
+        fetchNearbyDoctors(userLocation.lat, userLocation.lng, nearbyDoctorsProvider);
+      } else {
+        const dist = calculateDistanceKm(lastSearchedCoordsRef.current.lat, lastSearchedCoordsRef.current.lng, userLocation.lat, userLocation.lng);
+        if (dist >= 0.3) {
+          fetchNearbyDoctors(userLocation.lat, userLocation.lng, nearbyDoctorsProvider);
+        }
+      }
+    }
     setHospitals(getNearbyHospitalsWithLiveDistance(SEED_HOSPITALS, userLocation));
-  }, [userLocation.lat, userLocation.lng]);
+  }, [userLocation.lat, userLocation.lng, userLocation.isGpsDetected]);
 
   const watchIdRef = useRef<number | null>(null);
 
@@ -226,18 +331,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setUserLocation((prev) => ({
         ...prev,
         isTrackingActive: false,
-        trackingError: 'Geolocation is not supported by your browser',
+        trackingStatus: 'unsupported',
+        trackingError: 'Geolocation is not supported by your browser. Please use Chrome, Safari, or Edge.',
       }));
       return;
     }
 
     if (watchIdRef.current !== null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
     }
 
     setUserLocation((prev) => ({
       ...prev,
       isTrackingActive: true,
+      trackingStatus: 'requesting',
       trackingError: null,
       permissionDenied: false,
     }));
@@ -245,43 +353,66 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const id = navigator.geolocation.watchPosition(
         (pos) => {
-          const { latitude, longitude, accuracy } = pos.coords;
+          const { latitude, longitude, accuracy, speed, heading } = pos.coords;
           const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
           const newLoc: UserLocationState = {
             city: 'Live Device GPS',
-            area: `GPS: ${latitude.toFixed(4)}° N, ${longitude.toFixed(4)}° E (±${Math.round(accuracy)}m)`,
+            area: `GPS: ${latitude.toFixed(5)}° N, ${longitude.toFixed(5)}° E`,
             lat: latitude,
             lng: longitude,
-            accuracy,
+            accuracy: accuracy != null ? Math.round(accuracy) : null,
             isGpsDetected: true,
             isTrackingActive: true,
+            trackingStatus: 'tracking',
             trackingError: null,
             permissionDenied: false,
             lastUpdated: nowStr,
+            speed: speed ?? null,
+            heading: heading ?? null,
           };
           setUserLocation(newLoc);
         },
-        (err) => {
+        (err: GeolocationPositionError) => {
           console.warn('Geolocation watchPosition error:', err);
-          const isDenied = err.code === err.PERMISSION_DENIED;
+          let status: GpsTrackingStatus = 'unavailable';
+          let message = 'Unable to determine your GPS location.';
+          if (err.code === err.PERMISSION_DENIED) {
+            status = 'denied';
+            message = 'Location permission was denied. Please allow location access in your browser settings to find doctors, clinics, and hospitals near you.';
+          } else if (err.code === err.POSITION_UNAVAILABLE) {
+            status = 'unavailable';
+            message = 'GPS position is unavailable. Please check that your device GPS/location service is enabled and has a clear signal.';
+          } else if (err.code === err.TIMEOUT) {
+            status = 'timeout';
+            message = 'GPS acquisition timed out while waiting for a location fix. Tap "Retry GPS" or move to an open area.';
+          }
+
           setUserLocation((prev) => ({
             ...prev,
+            lat: prev.isGpsDetected ? prev.lat : null,
+            lng: prev.isGpsDetected ? prev.lng : null,
             isTrackingActive: false,
-            permissionDenied: isDenied,
-            trackingError: isDenied
-              ? 'Location permission denied by user'
-              : 'Unable to retrieve GPS coordinates',
+            trackingStatus: status,
+            permissionDenied: status === 'denied',
+            trackingError: message,
+            lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
           }));
         },
         {
           enableHighAccuracy: true,
-          timeout: 20000,
-          maximumAge: 10000,
+          timeout: 15000,
+          maximumAge: 3000,
         }
       );
       watchIdRef.current = id;
-    } catch (e) {
+    } catch (e: any) {
       console.error('Failed to start watchPosition:', e);
+      setUserLocation((prev) => ({
+        ...prev,
+        isTrackingActive: false,
+        trackingStatus: 'unavailable',
+        trackingError: e?.message || 'Failed to start GPS tracking.',
+      }));
     }
   };
 
@@ -293,6 +424,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setUserLocation((prev) => ({
       ...prev,
       isTrackingActive: false,
+      trackingStatus: 'idle',
     }));
   };
 
@@ -330,43 +462,86 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [ambulanceSim, setAmbulanceSim] = useState<AmbulanceSimulation>(INITIAL_AMBULANCE_SIMULATION);
 
   const detectUserLocation = async (): Promise<UserLocationState> => {
+    startLiveLocationTracking();
     return new Promise((resolve) => {
-      if ('geolocation' in navigator) {
-        navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            const loc: UserLocationState = {
-              city: 'Current Location',
-              area: `GPS: ${pos.coords.latitude.toFixed(4)}° N, ${pos.coords.longitude.toFixed(4)}° E (Telangana)`,
-              lat: pos.coords.latitude,
-              lng: pos.coords.longitude,
-              accuracy: pos.coords.accuracy,
-              isGpsDetected: true,
-              isTrackingActive: userLocation.isTrackingActive,
-              lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            };
-            setUserLocation(loc);
-            resolve(loc);
-          },
-          () => {
-            // Graceful fallback to Hyderabad, Telangana
-            const fallback: UserLocationState = {
-              city: 'Hyderabad',
-              area: 'Banjara Hills / Jubilee Hills, Hyderabad (Default)',
-              lat: 17.4123,
-              lng: 78.4354,
-              accuracy: 100,
-              isGpsDetected: false,
-              isTrackingActive: false,
-              lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            };
-            setUserLocation(fallback);
-            resolve(fallback);
-          },
-          { timeout: 8000, enableHighAccuracy: true }
-        );
-      } else {
-        resolve(userLocation);
+      if (typeof window === 'undefined' || !('geolocation' in navigator)) {
+        const unsupported: UserLocationState = {
+          city: 'Browser Unsupported',
+          area: 'Geolocation not supported',
+          lat: null,
+          lng: null,
+          accuracy: null,
+          isGpsDetected: false,
+          isTrackingActive: false,
+          trackingStatus: 'unsupported',
+          trackingError: 'Your browser does not support Geolocation. Please use Chrome, Safari, or Edge.',
+          permissionDenied: false,
+          lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        };
+        setUserLocation(unsupported);
+        resolve(unsupported);
+        return;
       }
+
+      setUserLocation((prev) => ({
+        ...prev,
+        trackingStatus: 'requesting',
+        trackingError: null,
+      }));
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const { latitude, longitude, accuracy, speed, heading } = pos.coords;
+          const loc: UserLocationState = {
+            city: 'Live Device GPS',
+            area: `GPS: ${latitude.toFixed(5)}° N, ${longitude.toFixed(5)}° E`,
+            lat: latitude,
+            lng: longitude,
+            accuracy: accuracy != null ? Math.round(accuracy) : null,
+            isGpsDetected: true,
+            isTrackingActive: true,
+            trackingStatus: 'tracking',
+            permissionDenied: false,
+            trackingError: null,
+            lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            speed: speed ?? null,
+            heading: heading ?? null,
+          };
+          setUserLocation(loc);
+          resolve(loc);
+        },
+        (err) => {
+          let status: GpsTrackingStatus = 'unavailable';
+          let message = 'Unable to determine GPS location.';
+          if (err.code === err.PERMISSION_DENIED) {
+            status = 'denied';
+            message = 'Location permission was denied. Please allow location access in your browser settings to find local doctors.';
+          } else if (err.code === err.POSITION_UNAVAILABLE) {
+            status = 'unavailable';
+            message = 'GPS position is unavailable. Please verify device location service is enabled.';
+          } else if (err.code === err.TIMEOUT) {
+            status = 'timeout';
+            message = 'GPS request timed out waiting for satellite fix. Please retry.';
+          }
+
+          const errorLoc: UserLocationState = {
+            city: status === 'denied' ? 'Permission Denied' : 'GPS Unavailable',
+            area: message,
+            lat: null,
+            lng: null,
+            accuracy: null,
+            isGpsDetected: false,
+            isTrackingActive: false,
+            trackingStatus: status,
+            permissionDenied: status === 'denied',
+            trackingError: message,
+            lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          };
+          setUserLocation(errorLoc);
+          resolve(errorLoc);
+        },
+        { timeout: 15000, enableHighAccuracy: true, maximumAge: 3000 }
+      );
     });
   };
 
@@ -1050,6 +1225,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         medicines,
         symptoms,
         doctors,
+        nearbyDoctorsLoading,
+        nearbyDoctorsError,
+        nearbyDoctorsConfigRequired,
+        nearbyDoctorsProvider,
+        setNearbyDoctorsProvider,
+        fetchNearbyDoctors,
+        refreshNearbyDoctors,
         hospitals,
         prediction,
         language,

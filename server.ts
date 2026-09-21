@@ -1,4 +1,5 @@
 import express, { Request, Response } from "express";
+import cors from "cors";
 import path from "path";
 import dotenv from "dotenv";
 import crypto from "crypto";
@@ -8,7 +9,48 @@ import { createServer as createViteServer } from "vite";
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+
+// In AI Studio Cloud Run container, port 3000 is required by the container's nginx proxy.
+// When running locally outside Cloud Run (e.g. localhost:5000), respects PORT or BACKEND_PORT.
+const PORT = process.env.K_SERVICE
+  ? 3000
+  : (process.env.PORT ? parseInt(process.env.PORT, 10) : (process.env.BACKEND_PORT ? parseInt(process.env.BACKEND_PORT, 10) : 5000));
+
+// Configure CORS for local development and container preview
+const allowedOrigins = [
+  "https://ais-dev-cmowcv5tjxxa5orsdmvbzm-109366021110.asia-southeast1.run.app",
+  "https://ais-pre-cmowcv5tjxxa5orsdmvbzm-109366021110.asia-southeast1.run.app",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:5000",
+  "http://127.0.0.1:5000",
+];
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (
+      allowedOrigins.includes(origin) ||
+      origin.endsWith(".run.app") ||
+      origin.includes("localhost") ||
+      origin.includes("127.0.0.1")
+    ) {
+      return callback(null, true);
+    }
+    return callback(null, true); // Dev-friendly fallback
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+
+// Explicit preflight handler
+app.options("*", cors());
 
 app.use(express.json());
 
@@ -18,8 +60,13 @@ interface OtpRecord {
   expiresAt: number;
   lastSentAt: number;
   attempts: number;
+  verifyService?: boolean;
 }
 const otpStore = new Map<string, OtpRecord>();
+
+// Twilio Verify Service cache
+let activeVerifyServiceSid: string | null =
+  process.env.TWILIO_VERIFY_SERVICE_SID || "VA7b290623d9e841243a25bc8c6beede87";
 
 // Periodic cleanup of expired OTPs
 setInterval(() => {
@@ -47,7 +94,14 @@ let geminiClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI | null {
   if (!geminiClient && process.env.GEMINI_API_KEY) {
     try {
-      geminiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      geminiClient = new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      });
     } catch (err) {
       console.error("Failed to initialize GoogleGenAI:", err);
     }
@@ -63,12 +117,14 @@ app.get("/api/health", (_req: Request, res: Response) => {
     process.env.TWILIO_AUTH_TOKEN &&
     process.env.TWILIO_PHONE_NUMBER
   );
+  const hasGoogleMaps = Boolean(process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_PLACES_API_KEY);
   res.json({
     status: "ok",
     appName: "MediMitra",
     version: "1.0.0",
     hasGeminiKey: hasGemini,
     hasTwilioKey: hasTwilio,
+    hasGoogleMapsKey: hasGoogleMaps,
     onlineAiAvailable: hasGemini,
   });
 });
@@ -78,10 +134,18 @@ app.get("/api/health", (_req: Request, res: Response) => {
 // ============================================================
 
 // 1. Send OTP
+app.get("/api/auth/send-otp", (_req: Request, res: Response) => {
+  res.status(405).json({
+    success: false,
+    error: "METHOD_NOT_ALLOWED",
+    message: "HTTP GET is not supported for /api/auth/send-otp. Please send a POST request with JSON body { phone: string }.",
+  });
+});
+
 app.post("/api/auth/send-otp", async (req: Request, res: Response) => {
   try {
-    const { phone } = req.body;
-    if (!phone || typeof phone !== "string") {
+    const rawPhone = req.body?.phone || req.body?.phoneNumber;
+    if (!rawPhone || typeof rawPhone !== "string") {
       return res.status(400).json({
         success: false,
         error: "INVALID_PHONE",
@@ -90,7 +154,7 @@ app.post("/api/auth/send-otp", async (req: Request, res: Response) => {
     }
 
     // Clean phone number (extract digits only, take last 10 digits for Indian numbers)
-    const digitsOnly = phone.replace(/\D/g, "");
+    const digitsOnly = rawPhone.replace(/\D/g, "");
     const cleanedPhone = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly;
 
     if (cleanedPhone.length !== 10) {
@@ -113,97 +177,159 @@ app.post("/api/auth/send-otp", async (req: Request, res: Response) => {
       });
     }
 
-    // Generate secure 6-digit OTP (100000 to 999999)
-    const otpCode = crypto.randomInt(100000, 1000000).toString();
-
-    // Hash the OTP with SHA-256 (Never store plaintext OTP)
-    const otpHash = crypto.createHash("sha256").update(otpCode).digest("hex");
-
-    // Store hashed OTP with 5-minute expiry
-    otpStore.set(cleanedPhone, {
-      hash: otpHash,
-      expiresAt: now + 5 * 60 * 1000,
-      lastSentAt: now,
-      attempts: 0,
-    });
-
     const maskedPhone = "******" + cleanedPhone.slice(-4);
 
-    // Check if SMS Gateway (Twilio) is configured
+    // Check Twilio environment variables
     const twilioSid = process.env.TWILIO_ACCOUNT_SID;
     const twilioAuth = process.env.TWILIO_AUTH_TOKEN;
     const twilioFrom = process.env.TWILIO_PHONE_NUMBER;
-    const isTwilioConfigured = Boolean(twilioSid && twilioAuth && twilioFrom);
 
-    if (isTwilioConfigured) {
+    const missingTwilioVars: string[] = [];
+    if (!twilioSid) missingTwilioVars.push("TWILIO_ACCOUNT_SID");
+    if (!twilioAuth) missingTwilioVars.push("TWILIO_AUTH_TOKEN");
+    if (!twilioFrom && !activeVerifyServiceSid) missingTwilioVars.push("TWILIO_PHONE_NUMBER");
+
+    if (missingTwilioVars.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: "SMS_PROVIDER_NOT_CONFIGURED",
+        missingVariables: missingTwilioVars,
+        message: `SMS Provider is not configured. Missing required backend environment variable(s): ${missingTwilioVars.join(", ")}. Please configure them in your backend .env file.`,
+      });
+    }
+
+    const authHeader = Buffer.from(`${twilioSid}:${twilioAuth}`).toString("base64");
+    let deliveryError: any = null;
+
+    // First attempt: Twilio Verify Service (handles trial accounts and international regulatory requirements)
+    if (activeVerifyServiceSid) {
       try {
-        const authHeader = Buffer.from(`${twilioSid}:${twilioAuth}`).toString("base64");
-        const bodyParams = new URLSearchParams({
-          To: `+91${cleanedPhone}`,
-          From: twilioFrom!,
-          Body: `Your MediMitra verification OTP is ${otpCode}. Valid for 5 minutes. Do not share this OTP with anyone.`,
-        });
-
-        const twilioRes = await fetch(
-          `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Messages.json`,
+        const verifyRes = await fetch(
+          `https://verify.twilio.com/v2/Services/${activeVerifyServiceSid}/Verifications`,
           {
             method: "POST",
             headers: {
               Authorization: `Basic ${authHeader}`,
               "Content-Type": "application/x-www-form-urlencoded",
             },
-            body: bodyParams.toString(),
+            body: new URLSearchParams({
+              To: `+91${cleanedPhone}`,
+              Channel: "sms",
+            }).toString(),
           }
         );
-
-        if (!twilioRes.ok) {
-          const errData = await twilioRes.json().catch(() => ({}));
-          console.error("Twilio SMS delivery failed:", errData);
-          return res.status(502).json({
-            success: false,
-            error: "SMS_DELIVERY_FAILED",
-            message: "Failed to deliver SMS to your mobile carrier. Please verify phone number and try again.",
+        const verifyData = await verifyRes.json().catch(() => ({}));
+        if (verifyRes.ok && (verifyData.status === "pending" || verifyData.status === "approved")) {
+          otpStore.set(cleanedPhone, {
+            hash: "",
+            expiresAt: now + 10 * 60 * 1000,
+            lastSentAt: now,
+            attempts: 0,
+            verifyService: true,
           });
+          return res.json({
+            success: true,
+            maskedPhone,
+            message: "OTP sent successfully",
+          });
+        } else {
+          deliveryError = verifyData;
+          console.warn("Twilio Verify API status:", verifyRes.status, verifyData);
         }
-
-        // Return success with ONLY the masked phone. NEVER expose OTP or unmasked data.
-        return res.json({
-          success: true,
-          maskedPhone,
-          message: "OTP sent to your mobile number.",
-        });
-      } catch (smsError: any) {
-        console.error("SMS gateway network error:", smsError);
-        return res.status(502).json({
-          success: false,
-          error: "SMS_DELIVERY_FAILED",
-          message: "SMS gateway error occurred while dispatching verification message.",
-        });
+      } catch (err: any) {
+        console.warn("Twilio Verify API network error, trying Messages API:", err?.message);
       }
     }
 
-    // If SMS Provider is NOT configured:
-    // Strictly per requirements: Do NOT fake delivery, do NOT show demo OTP, return clear configuration error.
-    return res.status(400).json({
+    // Second attempt: Standard Twilio Messages API (if phone number provided)
+    if (twilioFrom) {
+      const otpCode = crypto.randomInt(100000, 1000000).toString();
+      const otpHash = crypto.createHash("sha256").update(otpCode).digest("hex");
+
+      const fromNum = twilioFrom.startsWith("+")
+        ? twilioFrom
+        : (twilioFrom.startsWith("MG") ? twilioFrom : `+91${twilioFrom}`);
+
+      const bodyParams = new URLSearchParams({
+        To: `+91${cleanedPhone}`,
+        From: fromNum,
+        Body: `Your MediMitra verification OTP is ${otpCode}. Valid for 5 minutes. Do not share this OTP with anyone.`,
+      });
+
+      const twilioRes = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Messages.json`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${authHeader}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: bodyParams.toString(),
+        }
+      );
+
+      if (!twilioRes.ok) {
+        const errData = await twilioRes.json().catch(() => ({}));
+        console.error("Twilio SMS delivery failed:", errData);
+        const detailedMessage =
+          errData?.message ||
+          deliveryError?.message ||
+          "Failed to deliver SMS via Twilio. Please verify recipient number and Twilio account status.";
+        return res.status(502).json({
+          success: false,
+          error: "SMS_DELIVERY_FAILED",
+          message: detailedMessage,
+          details: errData,
+        });
+      }
+
+      otpStore.set(cleanedPhone, {
+        hash: otpHash,
+        expiresAt: now + 5 * 60 * 1000,
+        lastSentAt: now,
+        attempts: 0,
+        verifyService: false,
+      });
+
+      return res.json({
+        success: true,
+        maskedPhone,
+        message: "OTP sent successfully",
+      });
+    }
+
+    // If Twilio Verify failed and no TWILIO_PHONE_NUMBER was set
+    return res.status(502).json({
       success: false,
-      error: "SMS_PROVIDER_NOT_CONFIGURED",
-      message: "SMS Provider is not configured. Please configure TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER in Settings/environment to deliver OTPs to mobile phones.",
+      error: "SMS_DELIVERY_FAILED",
+      message: deliveryError?.message || "Failed to dispatch verification code via Twilio Verify Service.",
+      details: deliveryError,
     });
   } catch (err: any) {
     console.error("Error in /api/auth/send-otp:", err);
     return res.status(500).json({
       success: false,
       error: "SERVER_ERROR",
-      message: "An internal error occurred while processing OTP request.",
+      message: "An internal error occurred while processing OTP request: " + (err?.message || ""),
     });
   }
 });
 
 // 2. Verify OTP
+app.get("/api/auth/verify-otp", (_req: Request, res: Response) => {
+  res.status(405).json({
+    success: false,
+    error: "METHOD_NOT_ALLOWED",
+    message: "HTTP GET is not supported for /api/auth/verify-otp. Please send a POST request with JSON body { phone: string, otp: string }.",
+  });
+});
+
 app.post("/api/auth/verify-otp", async (req: Request, res: Response) => {
   try {
-    const { phone, otp } = req.body;
-    if (!phone || !otp) {
+    const rawPhone = req.body?.phone || req.body?.phoneNumber;
+    const rawOtp = req.body?.otp || req.body?.code;
+
+    if (!rawPhone || !rawOtp) {
       return res.status(400).json({
         success: false,
         error: "MISSING_DATA",
@@ -211,9 +337,9 @@ app.post("/api/auth/verify-otp", async (req: Request, res: Response) => {
       });
     }
 
-    const digitsOnly = phone.replace(/\D/g, "");
+    const digitsOnly = String(rawPhone).replace(/\D/g, "");
     const cleanedPhone = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly;
-    const trimmedOtp = String(otp).trim();
+    const trimmedOtp = String(rawOtp).trim();
 
     const record = otpStore.get(cleanedPhone);
     if (!record) {
@@ -243,15 +369,45 @@ app.post("/api/auth/verify-otp", async (req: Request, res: Response) => {
       });
     }
 
-    // Verify hash
-    const inputHash = crypto.createHash("sha256").update(trimmedOtp).digest("hex");
-    if (inputHash !== record.hash) {
-      record.attempts += 1;
-      return res.status(400).json({
-        success: false,
-        error: "INCORRECT_OTP",
-        message: "Incorrect OTP. Please try again.",
-      });
+    // If verification was dispatched through Twilio Verify Service
+    if (record.verifyService && activeVerifyServiceSid) {
+      const authHeader = Buffer.from(
+        `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+      ).toString("base64");
+      const checkRes = await fetch(
+        `https://verify.twilio.com/v2/Services/${activeVerifyServiceSid}/VerificationCheck`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${authHeader}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            To: `+91${cleanedPhone}`,
+            Code: trimmedOtp,
+          }).toString(),
+        }
+      );
+      const checkData = await checkRes.json().catch(() => ({}));
+      if (!checkRes.ok || checkData.status !== "approved" || !checkData.valid) {
+        record.attempts += 1;
+        return res.status(400).json({
+          success: false,
+          error: "INCORRECT_OTP",
+          message: "Incorrect OTP. Please enter the valid code sent to your phone.",
+        });
+      }
+    } else {
+      // Verify SHA-256 hash
+      const inputHash = crypto.createHash("sha256").update(trimmedOtp).digest("hex");
+      if (inputHash !== record.hash) {
+        record.attempts += 1;
+        return res.status(400).json({
+          success: false,
+          error: "INCORRECT_OTP",
+          message: "Incorrect OTP. Please try again.",
+        });
+      }
     }
 
     // OTP matched successfully! Invalidate it so it cannot be reused.
@@ -276,302 +432,561 @@ app.post("/api/auth/verify-otp", async (req: Request, res: Response) => {
   }
 });
 
-// AI Health Assistant endpoint
+// Helper to detect if user is explicitly requesting a detailed explanation
+export function isDetailRequested(query: string): boolean {
+  if (!query) return false;
+  const q = query.toLowerCase();
+
+  // English triggers
+  const enTriggers = [
+    "explain in detail",
+    "in detail",
+    "long answer",
+    "complete explanation",
+    "tell me more",
+    "explain more",
+    "give more detail",
+    "detailed explanation",
+    "detailed answer",
+    "elaborate",
+    "deep dive",
+    "in-depth",
+    "full details",
+    "detailed information",
+  ];
+  if (enTriggers.some((t) => q.includes(t))) return true;
+
+  // Telugu triggers (English transliteration & Telugu script)
+  const teTriggers = [
+    "detailed ga cheppu",
+    "inka explain cheyyi",
+    "inka explain chey",
+    "inka cheppu",
+    "motham cheppu",
+    "mottham cheppu",
+    "chala detail ga",
+    "వివరంగా చెప్పు",
+    "విస్తారంగా చెప్పు",
+    "వివరంగా వివరించు",
+    "విస్తారంగా వివరించు",
+    "మరింత చెప్పు",
+    "బాగా వివరించు",
+    "పూర్తిగా చెప్పు",
+    "పూర్తి వివరాలు",
+    "మొత్తం వివరాలు",
+    "ఇంకా చెప్పు",
+  ];
+  if (teTriggers.some((t) => q.includes(t) || query.includes(t))) return true;
+
+  // Hindi triggers (English transliteration & Devanagari script)
+  const hiTriggers = [
+    "vistar se batao",
+    "vistar se samjhao",
+    "detail me batao",
+    "aur batao",
+    "poora vivaran",
+    "विस्तार से बताओ",
+    "विस्तार से समझाइए",
+    "विस्तार से समझाओ",
+    "विस्तारपूर्वक",
+    "डिटेल में बताओ",
+    "पूरा विवरण",
+    "और बताओ",
+    "और समझाइए",
+  ];
+  if (hiTriggers.some((t) => q.includes(t) || query.includes(t))) return true;
+
+  return false;
+}
+
+// Helper to detect if a query is a general greeting or casual conversational chat
+export function isGeneralConversation(query: string): boolean {
+  if (!query) return false;
+  const q = query.toLowerCase().trim();
+
+  const greetings = [
+    "hi", "hello", "hey", "good morning", "good afternoon", "good evening", "good night",
+    "how are you", "how are you doing", "what's up", "whats up", "who are you",
+    "what can you do", "tell me about yourself", "tell me a joke", "thank you", "thanks",
+    "bye", "goodbye", "see you", "namaste", "namaskaram"
+  ];
+  if (greetings.some((g) => q === g || q.startsWith(g + " ") || q.endsWith(" " + g))) return true;
+
+  const teGreetings = [
+    "నమస్కారం", "హలో", "హాయ్", "బాగున్నారా", "ఎలా ఉన్నారు", "ఏం చేస్తున్నారు",
+    "శుభోదయం", "శుభరాత్రి", "ధన్యవాదాలు", "థాంక్స్", "మీరెవరు", "మీ పేరు ఏమిటి"
+  ];
+  if (teGreetings.some((g) => query.includes(g))) return true;
+
+  const hiGreetings = [
+    "नमस्ते", "नमस्कार", "हेलो", "हाय", "आप कैसे हैं", "क्या हाल है",
+    "सुप्रभात", "शुभ रात्रि", "धन्यवाद", "शुक्रिया", "आप कौन हैं"
+  ];
+  if (hiGreetings.some((g) => query.includes(g))) return true;
+
+  return false;
+}
+
+// Prompt builder respecting answer length (short by default, detailed on demand) and dual health/general modes
+export function buildMediMitraSystemPrompt(
+  userMessage: string,
+  language: string,
+  userContext: any = {}
+): { systemPrompt: string; isDetailed: boolean } {
+  const isDetailed = isDetailRequested(userMessage);
+  const langName = language === "te-IN" ? "Telugu" : language === "hi-IN" ? "Hindi" : "English";
+
+  const systemPrompt = `You are MedMitra, an intelligent, empathetic, and versatile AI assistant.
+Target User: ${userContext.name || "Friend"}, Location: ${userContext.userLocationArea || "Telangana / Andhra Pradesh, India"}.
+Selected Language: ${langName} (${language}).
+
+CRITICAL HIGHEST PRIORITY DIRECTIVES:
+1. ANSWER THE EXACT QUESTION:
+   - Always understand the user's specific intent and directly answer the exact question asked.
+   - DO NOT provide canned introductory phrases or generic templates.
+   - NEVER say "I am MedMitra, your health assistant...", "MedMitra provides personalized wellness insights...", or "Please consult a doctor" as the entire answer.
+   - Never repeat the same generic response for different questions.
+
+2. DUAL CAPABILITY (GENERAL & HEALTH):
+   - GENERAL CONVERSATIONS (greetings, daily life, general knowledge, math, science, current affairs, jokes, casual chat):
+     * Answer naturally, conversationally, and directly like a knowledgeable assistant.
+     * DO NOT force or redirect normal/general questions to healthcare or medical topics.
+     * Examples:
+       - "Who is the Prime Minister of India?" -> Answer directly: "The Prime Minister of India is Narendra Modi."
+       - "What is 25 + 37?" -> Answer directly: "62."
+       - "Tell me a joke." -> Tell a witty, clean, short joke.
+       - "How are you doing today?" -> Respond warmly and ask how their day is going.
+   - HEALTH CONVERSATIONS (symptoms, fever, colds, headache, blood pressure, diabetes, nutrition, sleep):
+     * Give a direct, practical, and safe answer to the specific health question first.
+     * Explain what is happening in simple, reassuring words.
+     * Provide practical general care advice, lifestyle tips, and warning signs without pretending to diagnose or prescribe.
+     * Recommend doctors or emergency care (108) ONLY when there are genuine red flags (chest pain, acute breathing difficulty, unconsciousness, severe persistent pain). Do NOT recommend emergency care for mild, everyday symptoms.
+
+3. ANSWER LENGTH DIRECTIVE:
+${
+  isDetailed
+    ? `   * DETAIL LEVEL: HIGH / DETAILED.
+     - The user explicitly asked for an in-depth or detailed explanation ("explain in detail", "detailed ga cheppu", "inka explain cheyyi", "వివరంగా చెప్పు", "विस्तार से बताओ", etc.).
+     - Provide a comprehensive, well-structured answer with clear sections, helpful practical guidance, mechanisms, and examples where appropriate. Keep it organized and engaging.`
+    : `   * DETAIL LEVEL: SHORT & CONCISE (DEFAULT).
+     - The user did NOT ask for a long essay. Keep your answer SHORT, clear, and easy to understand.
+     - Provide approximately 2 to 5 short sentences or a few concise bullet points.
+     - Avoid filler or unsolicited long paragraphs.`
+}
+
+4. CONVERSATION CONTEXT & FOLLOW-UPS:
+   - You have access to previous turns in the conversation.
+   - Always remember the conversation context and answer follow-up questions accurately based on prior messages (e.g., "What did I ask you earlier?", "Why?", "Explain more about that").
+
+5. STRICT LANGUAGE PURITY & NATURAL TONE:
+   - Always respond SOLELY in the chosen language (${langName}).
+   - Telugu (${language === "te-IN"}): Warm, natural conversational Telugu (common terms like షుగర్, బీపీ, టాబ్లెట్, ఫీవర్, డాక్టర్ are widely understood and natural).
+   - Hindi (${language === "hi-IN"}): Natural, polite, everyday Hindi.
+   - English: Clear, empathetic, concise, and professional.
+
+6. STRICT NO-MARKUP RULE:
+   - Never output SVG, XML, or HTML tags. Provide clean markdown or plain text only.`;
+
+  return { systemPrompt, isDetailed };
+}
+
+// Fallback generator when offline or Gemini API is not configured
+export function generateIntelligentAssistantFallback(
+  userMessage: string,
+  language: string,
+  isDetailed: boolean,
+  userName: string = "Friend",
+  history: any[] = []
+): string {
+  const lower = (userMessage || "").toLowerCase().trim();
+
+  // 1. ARITHMETIC / MATH (e.g. 25 + 37, 10 * 5)
+  const mathMatch = lower.match(/^(\d+(?:\.\d+)?)\s*([\+\-\*\/])\s*(\d+(?:\.\d+)?)$/) ||
+                    lower.match(/(?:what is|calculate)?\s*(\d+(?:\.\d+)?)\s*([\+\-\*\/])\s*(\d+(?:\.\d+)?)/i);
+  if (mathMatch) {
+    const n1 = parseFloat(mathMatch[1]);
+    const op = mathMatch[2];
+    const n2 = parseFloat(mathMatch[3]);
+    let ans = 0;
+    if (op === "+") ans = n1 + n2;
+    else if (op === "-") ans = n1 - n2;
+    else if (op === "*") ans = n1 * n2;
+    else if (op === "/") ans = n2 !== 0 ? Math.round((n1 / n2) * 100) / 100 : 0;
+    return `${ans}`;
+  }
+
+  // 2. CONTEXT MEMORY / "What did I ask you earlier?"
+  if (
+    lower.includes("what did i ask") ||
+    lower.includes("previous question") ||
+    lower.includes("earlier") ||
+    lower.includes("ముందు ఏం అడిగాను") ||
+    lower.includes("గత ప్రశ్న") ||
+    lower.includes("पिछला सवाल")
+  ) {
+    if (Array.isArray(history) && history.length > 1) {
+      // Find the user's prior message before the current one
+      const userMsgs = history.filter((m: any) => m.role === "user" || m.sender === "user");
+      if (userMsgs.length >= 2) {
+        const prior = userMsgs[userMsgs.length - 2];
+        const priorText = prior.content || prior.text;
+        if (priorText) {
+          if (language === "te-IN") return `మీరు ఇంతకుముందు అడిగిన ప్రశ్న: "${priorText}".`;
+          if (language === "hi-IN") return `आपने पहले यह सवाल पूछा था: "${priorText}".`;
+          return `Earlier you asked: "${priorText}".`;
+        }
+      }
+    }
+    if (language === "te-IN") return "మీరు ఈ సంభాషణలో అడిగిన ప్రశ్నలు నాకు గుర్తున్నాయి. మీరు దేని గురించి తెలుసుకోవాలనుకుంటున్నారు?";
+    if (language === "hi-IN") return "मुझे आपके पिछले सवाल याद हैं। आप आगे क्या जानना चाहते हैं?";
+    return "I have our conversation in mind. What would you like to know or follow up on?";
+  }
+
+  // 3. PRIME MINISTER / GENERAL KNOWLEDGE
+  if (
+    lower.includes("prime minister") ||
+    lower.includes("pm of india") ||
+    lower.includes("ప్రధాన మంత్రి") ||
+    lower.includes("प्रधान मंत्री")
+  ) {
+    if (language === "te-IN") return "భారతదేశ ప్రస్తుత ప్రధాన మంత్రి శ్రీ నరేంద్ర మోదీ.";
+    if (language === "hi-IN") return "भारत के वर्तमान प्रधानमंत्री श्री नरेंद्र मोदी हैं।";
+    return "The Prime Minister of India is Narendra Modi.";
+  }
+
+  // 4. JOKES
+  if (lower.includes("joke") || lower.includes("జోక్") || lower.includes("చురుకు") || lower.includes("चुटकुला")) {
+    if (language === "te-IN") {
+      return "ఒక చిన్న సరదా జోక్:\nపేషెంట్: డాక్టర్ గారు, రోజూ ఆపిల్ తింటే డాక్టర్ దగ్గరకు వెళ్లక్కర్లేదా?\nడాక్టర్: అవును, కానీ ఆ ఆపిల్‌ను సరిగ్గా విసరడం మీకు వచ్చి ఉండాలి!";
+    }
+    if (language === "hi-IN") {
+      return "एक छोटा चुटकुला:\nमरीज: डॉक्टर साहब, क्या सेब खाने से डॉक्टर दूर रहता है?\nडॉक्टर: हाँ, यदि आपका निशाना सही हो!";
+    }
+    return "Why did the scarecrow win an award? Because he was outstanding in his field!";
+  }
+
+  // 5. EMERGENCY / RED FLAG
+  if (
+    lower.includes("chest pain") ||
+    lower.includes("heart attack") ||
+    lower.includes("breathing") ||
+    lower.includes("unconscious") ||
+    lower.includes("ఛాతీ") ||
+    lower.includes("శ్వాస") ||
+    lower.includes("గుండె నొప్పి") ||
+    lower.includes("सीने में दर्द") ||
+    lower.includes("सांस नहीं")
+  ) {
+    if (language === "te-IN") {
+      return `⚠️ అత్యవసర హెచ్చరిక: ఛాతీ నొప్పి లేదా తీవ్ర శ్వాస ఆడకపోవడం అత్యవసర పరిస్థితి కావచ్చు. ప్రశాంతంగా కూర్చోండి. ఆలస్యం చేయకుండా వెంటనే 108 కి కాల్ చేయండి లేదా సమీప ఎమర్జెన్సీ హాస్పిటల్‌కు వెళ్ళండి.`;
+    }
+    if (language === "hi-IN") {
+      return `⚠️ आपातकालीन चेतावनी: सीने में तेज दर्द या सांस लेने में गंभीर कठिनाई आपातकालीन स्थिति हो सकती है। कृपया शांत होकर बैठें और बिना देरी किए तुरंत 108 पर कॉल करें या नजदीकी आपातकालीन अस्पताल जाएं।`;
+    }
+    return `⚠️ EMERGENCY NOTICE: Acute chest discomfort or severe breathing difficulty requires immediate emergency medical evaluation. Please sit calmly and dial 108 or proceed to the nearest emergency trauma center immediately.`;
+  }
+
+  // 6. GREETINGS & CASUAL CONVERSATION
+  if (
+    lower === "hi" ||
+    lower === "hello" ||
+    lower === "hey" ||
+    lower.includes("good morning") ||
+    lower.includes("good afternoon") ||
+    lower.includes("good evening") ||
+    lower.includes("how are you") ||
+    lower.includes("బాగున్నారా") ||
+    lower.includes("నమస్కారం") ||
+    lower.includes("ఎలా ఉన్నారు") ||
+    lower.includes("శుభోదయం") ||
+    lower.includes("नमस्ते") ||
+    lower.includes("कैसे हैं") ||
+    lower.includes("सुप्रभात")
+  ) {
+    if (language === "te-IN") {
+      return `నమస్కారం! నేను బాగున్నాను, ధన్యవాదాలు. మీరు ఎలా ఉన్నారు? ఈ రోజు నేను మీకు ఎలా సహాయపడగలను?`;
+    }
+    if (language === "hi-IN") {
+      return `नमस्ते! मैं अच्छा हूँ, धन्यवाद। आप कैसे हैं? आज मैं आपकी किस प्रकार मदद कर सकता हूँ?`;
+    }
+    return `Hello! I'm doing well, thank you. How are you doing today? How can I help you?`;
+  }
+
+  if (
+    lower.includes("who are you") ||
+    lower.includes("what can you do") ||
+    lower.includes("మీరెవరు") ||
+    lower.includes("మీరు ఎవరు") ||
+    lower.includes("आप कौन हैं")
+  ) {
+    if (language === "te-IN") {
+      return `నేను మెడిమిత్ర (MedMitra) – మీ వ్యక్తిగత సహాయకుడిని. మీరు నాతో సాధారణ విషయాలైనా మాట్లాడవచ్చు, లేదా ఆరోగ్యం, ఆహారం, మందులు, నిద్ర, బీపీ/షుగర్ గురించి ఏవైనా ప్రశ్నలు అడగవచ్చు.`;
+    }
+    if (language === "hi-IN") {
+      return `मैं मेडिमित्र (MedMitra) हूँ – आपका दैनिक साथी और स्वास्थ्य मार्गदर्शक। आप मुझसे सामान्य बातें कर सकते हैं या सेहत, पोषण और दिनचर्या से जुड़े सवाल पूछ सकते हैं।`;
+    }
+    return `I am MedMitra – your conversational companion and health guide. You can chat with me about everyday topics, ask general questions, or discuss wellness, nutrition, symptoms, and daily routines.`;
+  }
+
+  if (lower.includes("thank") || lower.includes("ధన్యవాదాలు") || lower.includes("థాంక్స్") || lower.includes("धन्यवाद") || lower.includes("शुक्रिया")) {
+    if (language === "te-IN") {
+      return `చాలా సంతోషం! మీకు ఎప్పుడు ఏ సందేహం ఉన్నా నాతో మాట్లాడవచ్చు. మీ రోజు ఆనందంగా గడవాలి!`;
+    }
+    if (language === "hi-IN") {
+      return `आपका बहुत-बहुत स्वागत है! जब भी सहायता चाहिए, बेझिझक पूछें। आपका दिन मंगलमय हो!`;
+    }
+    return `You're very welcome! Feel free to ask anytime you need anything. Have a great day!`;
+  }
+
+  // 7. FEVER
+  if (lower.includes("fever") || lower.includes("జ్వరం") || lower.includes("బుఖార్") || lower.includes("बुखार")) {
+    if (isDetailed) {
+      if (language === "te-IN") {
+        return `జ్వరం (Fever) గురించి పూర్తి వివరాలు:
+1. జ్వరం అంటే ఏమిటి: శరీర ఉష్ణోగ్రత సాధారణం (98.6°F) కంటే పెరిగి 100.4°F దాటితే దానిని జ్వరం అంటారు. ఇది రోగనిరోధక వ్యవస్థ వైరస్ లేదా బ్యాక్టీరియాతో పోరాడుతున్నప్పుడు వచ్చే సహజ స్పందన.
+2. ఇంట్లో పాటించవలసిన జాగ్రత్తలు: తగినంత నీరు, సూప్ లేదా కొబ్బరి నీళ్లు తాగి డీహైడ్రేషన్ రాకుండా చూసుకోండి. శరీరానికి మంచి విశ్రాంతి ఇవ్వండి. కాటన్ దుస్తులు ధరించండి.
+3. OTC సమాచారం: శరీర నొప్పులు మరియు జ్వరానికి పారాసిటమాల్ సాధారణంగా వాడతారు (లేబుల్ మోతాదు పాటించండి).
+4. డాక్టర్‌ని ఎప్పుడు కలవాలి: జ్వరం 102°F దాటినా, 3 రోజులకు మించి కొనసాగినా, లేదా తీవ్ర తలనొప్పి, మెడ పట్టేయడం, శ్వాస ఆడకపోవడం ఉంటే వెంటనే వైద్యులను సంప్రదించండి.`;
+      }
+      if (language === "hi-IN") {
+        return `बुखार (Fever) पर विस्तृत जानकारी:
+1. बुखार क्या है: जब शरीर का तापमान 98.6°F से बढ़कर 100.4°F से अधिक हो जाता है, तो इसे बुखार कहते हैं। यह शरीर की प्रतिरक्षा प्रणाली द्वारा संक्रमण से लड़ने की स्वाभाविक प्रतिक्रिया है।
+2. घरेलू देखभाल: खूब पानी, सूप या ओआरएस पिएं ताकि पानी की कमी न हो। भरपूर आराम करें और हल्के कपड़े पहनें।
+3. सामान्य OTC जानकारी: सामान्य बुखार और बदन दर्द के लिए पैरासिटामोल का उपयोग किया जाता है (दवा का लेबल पढ़ें)।
+4. डॉक्टर को कब दिखाएं: यदि बुखार 102°F से अधिक हो, 3 दिनों से अधिक रहे, या सांस फूलने और तेज सिरदर्द जैसी समस्या हो, तो डॉक्टर से सलाह लें।`;
+      }
+      return `Detailed Overview of Fever:
+1. What it is: A fever is defined as a temporary elevation in body temperature above 100.4°F (38°C), indicating that your immune system is actively fighting an infection.
+2. Home Management: Drink abundant fluids (water, electrolytes, broths) to prevent dehydration. Prioritize bed rest and wear breathable cotton clothing.
+3. OTC Information: Over-the-counter antipyretics like Paracetamol are commonly used to manage discomfort (always read packaging directions).
+4. When to See a Doctor: Consult a physician if fever exceeds 102°F, persists beyond 72 hours, or is accompanied by stiff neck, shortness of breath, rash, or persistent vomiting.`;
+    } else {
+      if (language === "te-IN") {
+        return `జ్వరం అనేది మన రోగనిరోధక వ్యవస్థ ఏదైనా ఇన్ఫెక్షన్ లేదా వైరస్‌తో పోరాడుతున్నప్పుడు శరీర ఉష్ణోగ్రత పెరిగే సహజ ప్రక్రియ (100.4°F దాటితే). తగినంత నీరు తాగి, బాగా విశ్రాంతి తీసుకోండి. ఉష్ణోగ్రత 102°F దాటినా లేదా 3 రోజుల కంటే ఎక్కువ కొనసాగినా డాక్టర్‌ను సంప్రదించండి.`;
+      }
+      if (language === "hi-IN") {
+        return `बुखार शरीर की एक स्वाभाविक प्रतिक्रिया है, जब हमारी प्रतिरक्षा प्रणाली किसी संक्रमण से लड़ रही होती है (तापमान 100.4°F से ऊपर)। पर्याप्त पानी पिएं और आराम करें। यदि बुखार 102°F से अधिक हो या 3 दिन से अधिक रहे, तो डॉक्टर से सलाह लें।`;
+      }
+      return `Fever is a temporary elevation of body temperature (typically above 100.4°F / 38°C), signaling that your immune system is actively fighting an infection. Stay well-hydrated, rest, and seek medical attention if it exceeds 102°F or lasts longer than 3 days.`;
+    }
+  }
+
+  // 8. COLD / COUGH
+  if (lower.includes("cold") || lower.includes("దగ్గు") || lower.includes("జలుబు") || lower.includes("सर्दी") || lower.includes("जुकाम") || lower.includes("cough")) {
+    if (isDetailed) {
+      if (language === "te-IN") {
+        return `తేలికపాటి జలుబు మరియు దగ్గుకు సమగ్ర సూచనలు:
+1. ఆవిరి పట్టడం: రోజుకు 1-2 సార్లు వేడి నీటి ఆవిరి పట్టడం వల్ల ముక్కు దిబ్బడ మరియు గొంతు నొప్పి తగ్గుతాయి.
+2. వెచ్చని ద్రవాలు: తులసి టీ, అల్లం కషాయం, వేడి సూప్ లేదా తేనెతో కూడిన గోరువెచ్చని నీరు తాగండి.
+3. విశ్రాంతి: తగినంత నిద్ర రోగనిరోధక శక్తిని పెంచుతుంది.
+4. హెచ్చరిక సంకేతాలు: ఛాతీ నొప్పి, తీవ్ర శ్వాస సమస్య, లేదా రక్తంతో కూడిన దగ్గు ఉంటే వెంటనే డాక్టర్‌ను సంప్రదించండి.`;
+      }
+      if (language === "hi-IN") {
+        return `सर्दी और जुकाम पर विस्तृत मार्गदर्शन:
+1. भाप लेना: दिन में 1-2 बार गर्म पानी की भाप लें, इससे बंद नाक और गले की खराश में आराम मिलता है।
+2. गर्म पेय: अदरक वाली चाय, गर्म सूप, या शहद और गुनगुना पानी लें।
+3. पर्याप्त आराम: शरीर को स्वस्थ होने के लिए भरपूर नींद और विश्राम दें।
+4. डॉक्टर को कब दिखाएं: यदि सांस लेने में तकलीफ हो, सीने में दर्द हो या 7 दिनों से अधिक खांसी रहे, तो डॉक्टर से परामर्श लें।`;
+      }
+      return `Guidance for Mild Cold & Cough:
+1. Hydration & Warm Liquids: Drink warm herbal teas, ginger infusions, or warm broths to soothe mucous membranes.
+2. Steam Inhalation: Gently inhaling warm steam helps clear nasal passages and relieve sinus congestion.
+3. Rest: Allow your body plenty of restorative sleep to support immune defense.
+4. Warning Signs: Seek clinical care if you develop breathing difficulty, sharp chest pain, high fever, or symptoms lasting over 10 days.`;
+    } else {
+      if (language === "te-IN") {
+        return `తేలికపాటి జలుబుకు గోరువెచ్చని నీరు లేదా సూప్ తాగడం, ఆవిరి పట్టడం మరియు తగినంత విశ్రాంతి తీసుకోవడం ఉపశమనం ఇస్తుంది. శ్వాస తీసుకోవడంలో ఇబ్బంది లేదా అధిక జ్వరం ఉంటే డాక్టర్‌ను సంప్రదించండి.`;
+      }
+      if (language === "hi-IN") {
+        return `हल्के जुकाम में गर्म पानी पिएं, भाप लें और आराम करें। यदि सांस लेने में परेशानी या तेज बुखार हो, तो डॉक्टर से सलाह लें।`;
+      }
+      return `For a mild cold, drink warm fluids, try gentle steam inhalation, and get plenty of rest. If you experience shortness of breath, wheezing, or high fever, consult a healthcare professional.`;
+    }
+  }
+
+  // 9. HEADACHE
+  if (lower.includes("headache") || lower.includes("తలనొప్పి") || lower.includes("सिरदर्द") || lower.includes("head ache")) {
+    if (isDetailed) {
+      if (language === "te-IN") {
+        return `తలనొప్పిపై సమగ్ర సమాచారం:
+1. సాధారణ కారణాలు: నీరు తక్కువ తాగడం (డీహైడ్రేషన్), మానసిక ఒత్తిడి, నిద్రలేమి, లేదా ఎక్కువ సమయం మొబైల్/కంప్యూటర్ స్క్రీన్లు చూడటం.
+2. తక్షణ ఉపశమనం: ఒక పెద్ద గ్లాసు నీరు తాగండి. స్క్రీన్‌లను ఆపి చీకటి, ప్రశాంతమైన గదిలో 20 నిమిషాలు విశ్రాంతి తీసుకోండి.
+3. OTC సమాచారం: స్వల్ప టెన్షన్ తలనొప్పికి సాధారణంగా పారాసిటమాల్ ఉపయోగిస్తారు (లేబుల్ సూచనలు పాటించండి).
+4. డాక్టర్‌ని ఎప్పుడు కలవాలి: తలనొప్పి చాలా తీవ్రంగా ఉండి, వాంతులు, కంటిచూపు మసకబారడం, లేదా మెడ పట్టేయడం ఉంటే వెంటనే డాక్టర్‌ను సంప్రదించండి.`;
+      }
+      if (language === "hi-IN") {
+        return `सिरदर्द पर विस्तृत जानकारी:
+1. सामान्य कारण: पानी की कमी (डिहाइड्रेशन), तनाव, नींद की कमी, या लगातार स्क्रीन देखना।
+2. त्वरित राहत: एक गिलास पानी पिएं, स्क्रीन बंद करें और शांत कमरे में 20 मिनट विश्राम करें।
+3. OTC जानकारी: हल्के दर्द में पैरासिटामोल जैसी दवाएं उपयोग की जाती हैं (पैकेट निर्देश पढ़ें)।
+4. डॉक्टर को कब दिखाएं: यदि दर्द अचानक बहुत तेज हो, उल्टी या चक्कर आएं, तो तुरंत डॉक्टर से परामर्श लें।`;
+      }
+      return `Detailed Guidance for Headache:
+1. Common Causes: Dehydration, mental stress, lack of sleep, eye strain from screens, or skipped meals.
+2. Immediate Action: Drink a large glass of water, step away from screens, and rest in a quiet, dark room for 20 minutes.
+3. OTC Information: Mild tension headaches often respond to simple over-the-counter Paracetamol (follow packaging instructions).
+4. When to See a Doctor: Seek medical attention if headaches are sudden and excruciating, accompanied by nausea, stiff neck, or visual changes.`;
+    } else {
+      if (language === "te-IN") {
+        return `తలనొప్పికి డీహైడ్రేషన్, స్క్రీన్ ఒత్తిడి లేదా నిద్రలేమి సాధారణ కారణాలు. ఒక గ్లాసు నీరు తాగి, మొబైల్ పక్కనపెట్టి కొద్దిసేపు విశ్రాంతి తీసుకోండి. నొప్పి 2 రోజుల కంటే ఎక్కువ కొనసాగితే వైద్యులను సంప్రదించండి.`;
+      }
+      if (language === "hi-IN") {
+        return `सिरदर्द अक्सर पानी की कमी, तनाव या स्क्रीन के खिंचाव से होता है। एक गिलास पानी पिएं और थोड़ी देर शांत विश्राम करें। यदि दर्द लगातार बना रहे तो डॉक्टर से जांच कराएं।`;
+      }
+      return `Headaches are commonly caused by dehydration, eye strain from screens, stress, or lack of sleep. Drink a tall glass of water and rest in a quiet, dimly lit room. If it persists beyond 48 hours or is unusually severe, consult a physician.`;
+    }
+  }
+
+  // 10. BLOOD PRESSURE (BP)
+  if (lower.includes("bp") || lower.includes("blood pressure") || lower.includes("రక్తపోటు") || lower.includes("బీపీ") || lower.includes("रक्तचाप")) {
+    if (isDetailed) {
+      if (language === "te-IN") {
+        return `రక్తపోటు (BP) నిర్వహణ వివరాలు:
+1. ఆహారం: ఆహారంలో ఉప్పు తగ్గించండి (రోజుకు 1 టీస్పూన్ లోపు). వేపుళ్ళు, నిల్వ పచ్చళ్లకు దూరంగా ఉండండి.
+2. జీవనశైలి: రోజూ 30 నిమిషాల వాకింగ్ చేయండి. రాత్రి 7-8 గంటల నిద్ర బీపీని స్థిరంగా ఉంచుతుంది.
+3. మందులు: డాక్టర్ సూచించిన బీపీ మందులను సమయానికి తీసుకోవాలి; డాక్టర్‌ను అడగకుండా ఎప్పుడూ ఆపకూడదు.
+4. హెచ్చరిక: రీడింగ్ 180/120 దాటితే లేదా ఛాతీలో నొప్పి, తీవ్ర తలతిరగడం ఉంటే వెంటనే ఆసుపత్రికి వెళ్ళండి.`;
+      }
+      if (language === "hi-IN") {
+        return `रक्तचाप (BP) नियंत्रण पर विस्तृत मार्गदर्शन:
+1. आहार: नमक कम खाएं, तले हुए और अधिक तैलीय भोजन से बचें।
+2. दैनिक आदतें: रोजाना 30 मिनट टहलें और 7-8 घंटे की अच्छी नींद लें।
+3. दवाएं: डॉक्टर द्वारा दी गई बीपी की दवा समय पर लें; कभी खुद से बंद न करें।
+4. चेतावनी: बीपी 180/120 से ऊपर होने पर तुरंत अस्पताल जाएं।`;
+      }
+      return `Blood Pressure (BP) Management:
+1. Dietary: Restrict sodium intake to under 1 teaspoon per day. Avoid heavily processed or salted snacks.
+2. Lifestyle: Maintain 30 minutes of moderate aerobic activity daily and ensure 7-8 hours of sleep.
+3. Medication: Take antihypertensives strictly as prescribed; never discontinue without medical advice.
+4. Danger Threshold: If readings exceed 180/120 mmHg or you feel chest pressure, seek emergency care immediately.`;
+    } else {
+      if (language === "te-IN") {
+        return `బీపీని నియంత్రణలో ఉంచుకోవడానికి ఆహారంలో ఉప్పు తగ్గించండి, రోజూ 30 నిమిషాలు వాకింగ్ చేయండి మరియు సమయానికి నిద్రపోండి. డాక్టర్ సూచించిన మందులను క్రమం తప్పకుండా తీసుకోవడం ముఖ్యం.`;
+      }
+      if (language === "hi-IN") {
+        return `बीपी नियंत्रित रखने के लिए नमक कम खाएं, रोज 30 मिनट सैर करें और समय पर सोएं। डॉक्टर की दवा नियमित लें।`;
+      }
+      return `To maintain healthy blood pressure, moderate your salt intake, walk 30 minutes daily, and prioritize good sleep. Always take prescribed medications consistently.`;
+    }
+  }
+
+  // 11. WATER & HYDRATION
+  if (lower.includes("water") || lower.includes("hydration") || lower.includes("నీరు") || lower.includes("నీళ్లు") || lower.includes("पानी")) {
+    if (language === "te-IN") {
+      return `సాధారణంగా ఒక ఆరోగ్యకరమైన వ్యక్తి రోజూ 2.5 నుండి 3 లీటర్ల మంచి నీరు తాగడం మంచిది. కొద్ది కొద్దిగా రోజంతా నీరు తాగుతూ హైడ్రేటెడ్‌గా ఉండండి.`;
+    }
+    if (language === "hi-IN") {
+      return `एक स्वस्थ वयस्क के लिए रोजाना 2.5 से 3 लीटर पानी पीना लाभदायक होता है। दिनभर थोड़ा-थोड़ा पानी पीते रहें।`;
+    }
+    return `Healthy adults should generally drink about 2.5 to 3 liters of water daily. Sip consistently across the day to stay comfortably hydrated.`;
+  }
+
+  // 12. SLEEP / REST
+  if (lower.includes("sleep") || lower.includes("నిద్ర") || lower.includes("నీంద") || lower.includes("insomnia")) {
+    if (language === "te-IN") {
+      return `రాత్రి 7 నుండి 8 గంటల నిద్ర శరీరానికి మరియు మనస్సుకు ఎంతో అవసరం. పడుకునే అరగంట ముందు ఫోన్ స్క్రీన్ పక్కనపెట్టి ప్రశాంతమైన వాతావరణంలో విశ్రాంతి తీసుకోండి.`;
+    }
+    if (language === "hi-IN") {
+      return `अच्छे स्वास्थ्य के लिए 7 से 8 घंटे की नींद जरूरी है। सोने से 30 मिनट पहले स्क्रीन बंद कर दें और शांत माहौल रखें।`;
+    }
+    return `Aim for 7 to 8 hours of restful sleep each night. Putting screens away 30 minutes before bed significantly enhances restorative sleep.`;
+  }
+
+  // 13. DIRECT ANSWER FOR GENERAL INQUIRIES
+  if (language === "te-IN") {
+    return isDetailed
+      ? `మీ ప్రశ్నను అర్థం చేసుకున్నాను. మీ రోజువారీ శ్రేయస్సు కోసం సమతుల్య ఆహారం, రోజూ తేలికపాటి వ్యాయామం, మరియు తగినంత విశ్రాంతి తీసుకోవడం చాలా ముఖ్యం. మీరు అడిగిన అంశంపై ఇంకా ఏదైనా నిర్దిష్ట సమాచారం కావాలంటే అడగండి.`
+      : `నేను మీతో మాట్లాడటానికి సిద్ధంగా ఉన్నాను. మీరు అడిగిన విషయానికి సమాధానం అందించడానికి నేను ఇక్కడ ఉన్నాను. మీకు మరేదైనా సందేహం ఉంటే స్వేచ్ఛగా అడగండి.`;
+  }
+  if (language === "hi-IN") {
+    return isDetailed
+      ? `आपके प्रश्न को समझा गया। स्वस्थ दिनचर्या के लिए संतुलित भोजन, नियमित व्यायाम और पर्याप्त नींद महत्वपूर्ण हैं। यदि आप इस बारे में और विस्तार से जानना चाहते हैं, तो बताएं।`
+      : `मैं आपकी बात समझ रहा हूँ। आप मुझसे किसी भी विषय पर बात कर सकते हैं। बताइए, आगे आप क्या जानना चाहते हैं?`;
+  }
+  return isDetailed
+    ? `I understand your question. For balanced wellness and clarity, focus on healthy routines, consistent rest, and positive daily habits. Let me know if you would like me to elaborate further on any specific aspect.`
+    : `I'm here to assist you! Feel free to ask any question or chat casually about any topic.`;
+}
+
+// AI Assistant endpoint
 app.post("/api/assistant/chat", async (req: Request, res: Response) => {
   try {
     const { message, messages, language = "en-IN", userContext = {} } = req.body;
-    const userMessage = message || (messages && messages.length > 0 ? messages[messages.length - 1].content || messages[messages.length - 1].text : "");
+    const userMessage = message || (Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1].content || messages[messages.length - 1].text : "");
 
     const client = getGeminiClient();
+    const { systemPrompt, isDetailed } = buildMediMitraSystemPrompt(userMessage, language, userContext);
 
-    const langName = language === "te-IN" ? "Telugu" : language === "hi-IN" ? "Hindi" : "English";
+    // Prepare multi-turn conversation history for Gemini
+    const rawHistory = Array.isArray(messages) && messages.length > 0
+      ? messages
+      : [{ role: "user", content: userMessage }];
 
-    // System instruction strictly adhering to medical safety rules & natural localized Telugu
-    const systemPrompt = `You are MediMitra, a caring, respectful, and medically accurate AI Health Companion.
-Target Patient: ${userContext.name || "Patient"}, Age: ${userContext.age || "Adult"}, Location: ${userContext.userLocationArea || "Telangana / Andhra Pradesh, India"}.
-Selected Language: ${langName} (${language}).
+    const geminiContents = rawHistory
+      .filter((m: any) => Boolean(m.content || m.text))
+      .map((m: any) => ({
+        role: (m.role === "assistant" || m.role === "model" || m.sender === "assistant") ? "model" : "user",
+        parts: [{ text: String(m.content || m.text).trim() }],
+      }));
 
-STRICT LANGUAGE INTEGRITY RULE:
-- Generate your entire response SOLELY in ${langName}.
-- If language is Telugu: Write PURELY in Telugu. Do NOT append English text, do NOT append Hindi text.
-- If language is Hindi: Write PURELY in Hindi. Do NOT append English text, do NOT append Telugu text.
-- If language is English: Write PURELY in English. Do NOT append Telugu or Hindi text.
-- NEVER concatenate translations together. NEVER output dual-language answers.
-
-STRICT NO-RAW-SVG / NO-MARKUP RULE:
-- ABSOLUTELY NEVER output raw SVG, <svg>, </svg>, XML, or HTML tags.
-- NEVER write words like "svg", "<svg>", or icon source markup in your text.
-- Provide clean, beautifully formatted plain text with markdown bullet points only.
-
-TELUGU TONE MANDATE (if language is Telugu):
-- Sound like a loving, caring family doctor or elder from Andhra Pradesh / Telangana.
-- Use everyday spoken Telugu that is clear and natural for rural and elderly patients.
-- Use natural medical terms familiar in conversational Telugu: 'షుగర్' (sugar), 'బీపీ' (BP), 'టాబ్లెట్' (tablet), 'రిపోర్ట్' (report), 'హాస్పిటల్' (hospital), 'ఫీవర్' (fever), 'రెస్ట్' (rest).
-- Use respectful honorifics: 'చెప్పండి', 'తీసుకోండి', 'కంగారు పడకండి', 'జాగ్రత్తగా ఉండండి'.
-- Never use archaic, textbook, or awkward literal translations.
-
-SYMPTOM GUIDANCE STRUCTURE (When the user mentions symptoms, complaints, or health issues, structure your response with these exact 6 sections in ${langName}):
-1. What the symptom may commonly be related to (Common reasons, non-conclusive)
-2. What you can safely do now (Immediate, safe self-care, hydration, rest)
-3. Things to avoid (Triggers, heavy exertion, skipping meals, etc.)
-4. When to see a doctor (Warning thresholds, duration, high temperature)
-5. Emergency warning signs (Signs requiring 108/emergency attention)
-6. Doctor Advice (Specify which medical specialist is appropriate, why, and a reminder that only a doctor can evaluate and prescribe treatment)
-
-MEDICAL SAFETY RULES:
-- Never claim a confirmed diagnosis.
-- Never generate a fake prescription or recommend prescription-only medications.
-- If mentioning minor OTC relief (e.g. Paracetamol, ORS), clearly note that it is general OTC information, NOT a prescription, and to consult a doctor or pharmacist.
-- For severe symptoms (chest pain, severe breathlessness, sudden weakness), immediately advise calling 108.`;
+    // Ensure the last content element has role 'user'
+    if (geminiContents.length === 0 || geminiContents[geminiContents.length - 1].role !== "user") {
+      geminiContents.push({
+        role: "user",
+        parts: [{ text: userMessage }],
+      });
+    }
 
     if (client) {
-      try {
-        const response = await client.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: `${systemPrompt}\n\nPatient Query: ${userMessage}\n\nMediMitra response (in ${language === 'te-IN' ? 'Telugu only' : language === 'hi-IN' ? 'Hindi only' : 'English only'}):`,
-                },
-              ],
-            },
-          ],
-        });
+      const candidateModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite"];
+      for (const model of candidateModels) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const response = await client.models.generateContent({
+              model,
+              config: {
+                systemInstruction: systemPrompt,
+                temperature: 0.3,
+              },
+              contents: geminiContents,
+            });
 
-        const cleanText = sanitizeAiText(response.text || "");
-        if (cleanText) {
-          return res.json({ reply: cleanText });
+            const cleanText = sanitizeAiText(response.text || "");
+            if (cleanText) {
+              return res.json({ reply: cleanText });
+            }
+          } catch (geminiError: any) {
+            const errStr = String(geminiError?.message || "");
+            const status = geminiError?.status || geminiError?.code;
+            const isQuota = status === 429 || status === "RESOURCE_EXHAUSTED" || errStr.includes("quota") || errStr.includes("Quota");
+            const isUnavailable = status === 503 || status === "UNAVAILABLE" || errStr.includes("high demand");
+
+            if (isUnavailable && attempt === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              continue;
+            }
+
+            console.log(`[Gemini API] Model ${model} ${isQuota ? "quota reached" : "transient issue"} (${status || "unknown"}), trying next model...`);
+            break;
+          }
         }
-      } catch (geminiError) {
-        console.error("Gemini 3.8 Flash chat generation error:", geminiError);
       }
     }
 
-    // High quality intelligent fallback if API key is not configured or in offline mode
-    let fallbackReply = "";
-    const lower = (userMessage || "").toLowerCase();
-
-    if (lower.includes("chest pain") || lower.includes("heart") || lower.includes("breathing") || lower.includes("ఛాతీ") || lower.includes("శ్వాస") || lower.includes("सीने में दर्द")) {
-      fallbackReply = language === "te-IN"
-        ? `⚠️ అత్యవసర హెచ్చరిక (EMERGENCY)
-1. ఏమి అర్థమైంది: ఛాతీ నొప్పి లేదా శ్వాస తీసుకోవడంలో తీవ్రమైన ఇబ్బందిని మీరు చెప్పారు.
-2. తక్షణ సూచన: వెంటనే ప్రశాంతంగా కూర్చోండి, వదులుగా ఉండే బట్టలు వేసుకోండి. ఒంటరిగా డ్రైవ్ చేయకండి.
-3. ఎమర్జెన్సీ చర్య: దయచేసి ఆలస్యం చేయకుండా 108 లేదా 112 కి వెంటనే కాల్ చేయండి లేదా సమీప ఎమర్జెన్సీ హాస్పిటల్‌కు వెళ్ళండి.
-Doctor Advice: కార్డియాలజిస్ట్ (Cardiologist) లేదా ఎమర్జెన్సీ మెడిసిన్ డాక్టర్‌ను వెంటనే సంప్రదించండి. డాక్టర్ మాత్రమే తగిన పరీక్షలు చేసి చికిత్స అందిస్తారు.`
-        : language === "hi-IN"
-        ? `⚠️ आपातकालीन चेतावनी (EMERGENCY)
-1. क्या समझा गया: आपने सीने में दर्द या सांस लेने में कठिनाई बताई है।
-2. तत्काल मार्गदर्शन: तुरंत शांत होकर बैठें, किसी भी तनाव से बचें। खुद वाहन न चलाएं।
-3. आपातकालीन कार्रवाई: कृपया बिना देरी किए 108 या 112 पर तुरंत कॉल करें या नजदीकी आपातकालीन अस्पताल जाएं।
-Doctor Advice: हृदय रोग विशेषज्ञ (Cardiologist) या आपातकालीन चिकित्सक से तुरंत संपर्क करें। एक डॉक्टर ही लक्षणों का सही मूल्यांकन कर उपचार कर सकते हैं।`
-        : `⚠️ EMERGENCY ADVISORY
-1. WHAT MEDIMITRA UNDERSTOOD: You reported chest pain or acute difficulty breathing.
-2. IMMEDIATE GUIDANCE: Sit upright in a comfortable, ventilated position. Loosen tight clothing. Do not attempt to drive yourself.
-3. EMERGENCY ACTION: Please call emergency services (108 / 112) or go to the nearest emergency hospital trauma center immediately. MediMitra is an informational guide, not an emergency doctor.
-Doctor Advice: Emergency Physician or Cardiologist evaluation is urgently required. A doctor can evaluate your symptoms and prescribe treatment if needed.`;
-    } else if (lower.includes("headache") || lower.includes("తలనొప్పి") || lower.includes("सिरदर्द") || lower.includes("head ache")) {
-      fallbackReply = language === "te-IN"
-        ? `1. ఏమి అర్థమైంది: మీరు తలనొప్పి గురించి చెప్పారు. ఇది ఎంత సమయం నుండి ఉంది? తీవ్రత ఎలా ఉంది?
-2. సాధారణ సూచనలు: ఒక గ్లాసు నీరు త్రాగండి, ప్రశాంతమైన చల్లని గదిలో కొద్దిసేపు విశ్రాంతి తీసుకోండి. మొబైల్ లేదా టీవీ స్క్రీన్లు చూడటం ఆపండి.
-3. General OTC Information:
-సాధారణ తలనొప్పికి పారాసిటమాల్ (Paracetamol) వంటి ఓవర్-ది-కౌంటర్ మందులను సాధారణంగా ఉపయోగిస్తారు. ఇది డాక్టర్ ప్రిస్క్రిప్షన్ కాదు. ప్యాకేజీ లేబుల్ సూచనలను చదవండి లేదా ఫార్మసిస్ట్‌ను అడగండి.
-4. డాక్టర్‌ని ఎప్పుడు కలవాలి: తలనొప్పి 2 రోజుల కంటే ఎక్కువ ఉన్నా, తీవ్రమైన జ్వరం లేదా మెడ పట్టేయడం ఉన్నా వెంటనే చూపించాలి.
-5. Doctor Advice:
-జనరల్ ఫిజీషియన్ (General Physician) లేదా న్యూరాలజిస్ట్‌ను సంప్రదించవచ్చు. డాక్టర్ పరీక్షించి సరైన చికిత్స అందించగలరు.`
-        : language === "hi-IN"
-        ? `1. क्या समझा गया: आपने सिरदर्द के बारे में बताया है। क्या यह दर्द कितने समय से है?
-2. सरल मार्गदर्शन: पर्याप्त पानी पिएं, शांत व ठंडे कमरे में विश्राम करें। मोबाइल/स्क्रीन से ब्रेक लें।
-3. General OTC Information:
-हल्के सिरदर्द के लिए पैरासिटामोल (Paracetamol) जैसी ओवर-द-काउंटर दवाएं सामान्यतः उपयोग की जाती हैं। यह डॉक्टर का पर्चा नहीं है। दवा के पैकेट पर लिखे निर्देश पढ़ें या फार्मासिस्ट से पूछें।
-4. डॉक्टर को कब दिखाएं: यदि दर्द 2 दिनों से अधिक रहे, बहुत तेज हो, या उल्टी/धुंधलापन हो तो तुरंत डॉक्टर को दिखाएं।
-5. Doctor Advice:
-जनरल फिजिशियन (General Physician) से परामर्श लें। डॉक्टर आपके लक्षणों की जांच कर सही उपचार लिख सकते हैं।`
-        : `1. WHAT MEDIMITRA UNDERSTOOD:
-You reported having a headache. (Follow-up: How long have you experienced this, and is it accompanied by nausea or sensitivity to light?)
-
-2. SIMPLE GUIDANCE:
-- Drink a tall glass of water to ensure proper hydration.
-- Rest in a quiet, dimly lit room with cool ventilation.
-- Take a 20-minute break from phone, computer, or television screens.
-- Apply a cool damp cloth gently across your forehead.
-
-3. General OTC Information:
-For common tension or mild headaches, adults frequently use basic over-the-counter pain relievers such as Paracetamol.
-Note: This is general OTC information, not a doctor's prescription. Always check the package label for instructions and consult a pharmacist, parent/guardian, or doctor before taking any medicine.
-
-4. WHEN TO SEE A DOCTOR:
-Seek prompt medical evaluation if the headache is sudden and unusually severe ("thunderclap"), persists beyond 2 days, or is accompanied by fever, stiff neck, vomiting, or vision changes.
-
-5. Doctor Advice:
-Recommended Specialist: General Physician or Neurologist.
-Why this specialty: A physician can examine your blood pressure, sinus pressure, or neurological signs and determine underlying causes.
-"A doctor can evaluate your symptoms and prescribe treatment if needed."`;
-    } else if (lower.includes("fever") || lower.includes("జ్వరం") || lower.includes("बुखार") || lower.includes("temparature")) {
-      fallbackReply = language === "te-IN"
-        ? `1. ఏమి అర్థమైంది: మీరు జ్వరం గురించి చెప్పారు. థర్మామీటర్‌తో ఉష్ణోగ్రత చూశారా? (ఎంత ఉందో చెప్పండి).
-2. సాధారణ సూచనలు: పుష్కలంగా మంచినీరు, ఓఆర్ఎస్ లేదా కొబ్బరినీళ్ళు త్రాగండి. వదులుగా ఉండే కాటన్ దుస్తులు ధరించండి. గోరువెచ్చని నీటితో స్పాంజ్ చేయండి.
-3. General OTC Information:
-జ్వరాన్ని తగ్గించడానికి పారాసిటమాల్ (Paracetamol) సాధారణంగా లభించే OTC మందు. ఇది డాక్టర్ ప్రిస్క్రిప్షన్ కాదు. ఎల్లప్పుడూ లేబుల్ సూచనలను గమనించండి మరియు ఫార్మసిస్ట్ లేదా డాక్టర్‌ను అడగండి. పిల్లలకు ఇచ్చేటప్పుడు డాక్టర్ సలహా తప్పనిసరి.
-4. డాక్టర్‌ని ఎప్పుడు కలవాలి: జ్వరం 102°F కంటే ఎక్కువ ఉన్నా, 3 రోజుల కంటే ఎక్కువ కొనసాగినా, లేదా తీవ్రమైన వణుకు, వాంతులు ఉంటే వెంటనే చూపించండి.
-5. Doctor Advice:
-జనరల్ ఫిజీషియన్ (General Physician) ను సంప్రదించండి. అవసరమైతే రక్త పరీక్షలు చేసి సరైన యాంటీబయాటిక్స్ లేదా చికిత్సను డాక్టర్ మాత్రమే నిర్ణయిస్తారు.`
-        : language === "hi-IN"
-        ? `1. क्या समझा गया: आपने बुखार के बारे में बताया है। क्या आपने थर्मामीटर से तापमान मापा है?
-2. सरल मार्गदर्शन: खूब पानी, ओआरएस या नारियल पानी पिएं। हल्के सूती कपड़े पहनें। गुनगुने पानी की पट्टी माथे पर रख सकते हैं।
-3. General OTC Information:
-हल्के बुखार को कम करने के लिए पैरासिटामोल (Paracetamol) एक सामान्य ओवर-द-काउंटर विकल्प है। यह डॉक्टर का पर्चा नहीं है। दवा के पैकेट के निर्देशों का पालन करें और फार्मासिस्ट या डॉक्टर से सलाह लें।
-4. डॉक्टर को कब दिखाएं: यदि बुखार 102°F से अधिक हो, 3 दिनों से ज्यादा रहे, या सांस में तकलीफ हो तो तुरंत अस्पताल जाएं।
-5. Doctor Advice:
-जनरल फिजिशियन (General Physician) से परामर्श लें। डॉक्टर आपके लक्षणों की जांच कर सही दवा और उपचार लिख सकते हैं।`
-        : `1. WHAT MEDIMITRA UNDERSTOOD:
-You reported having a fever. (Follow-up: Have you measured your body temperature with a thermometer, and do you have chills or body aches?)
-
-2. SIMPLE GUIDANCE:
-- Stay well hydrated: drink clean water, electrolyte fluids (ORS), or warm clear soups.
-- Wear light, breathable cotton clothing and rest in a comfortable room.
-- You may use a damp lukewarm cloth for forehead sponge cooling (avoid cold ice water).
-- Avoid heavy physical exertion.
-
-3. General OTC Information:
-For common fever, Paracetamol is a widely used over-the-counter antipyretic.
-Note: This is general OTC information, not a doctor's prescription. Always follow package instructions and ask a pharmacist or healthcare provider. Never give aspirin to children or teenagers without a doctor.
-
-4. WHEN TO SEE A DOCTOR:
-Consult a physician if temperature exceeds 102°F (38.9°C), persists for more than 3 days, or is accompanied by stiff neck, shortness of breath, or rash.
-
-5. Doctor Advice:
-Recommended Specialist: General Physician or Pediatrician (for children).
-Why this specialty: A physician can identify if the fever stems from a viral or bacterial source and order relevant lab tests if needed.
-"A doctor can evaluate your symptoms and prescribe treatment if needed."`;
-    } else if (lower.includes("cough") || lower.includes("దగ్గు") || lower.includes("खांसी")) {
-      fallbackReply = language === "te-IN"
-        ? `1. ఏమి అర్థమైంది: మీరు దగ్గు గురించి చెప్పారు. ఇది పొడి దగ్గా లేదా కఫం వస్తుందా?
-2. సాధారణ సూచనలు: గోరువెచ్చని నీటిలో కొద్దిగా ఉప్పు వేసి గార్గిల్ చేయండి. గోరువెచ్చని నీరు త్రాగండి, ఆవిరి పట్టండి. చల్లని పానీయాలు, ఐస్ క్రీములు నివారించండి.
-3. General OTC Information:
-గొంతు గరగరకు తేనెతో కూడిన కాఫ్ లోజెంజెస్ (Cough Lozenges) వంటివి సాధారణంగా ఉపశమనం ఇస్తాయి. ఇది డాక్టర్ ప్రిస్క్రిప్షన్ కాదు. లేబుల్ వివరాలు చూడండి లేదా ఫార్మసిస్ట్‌ను సంప్రదించండి.
-4. డాక్టర్‌ని ఎప్పుడు కలవాలి: దగ్గుతో పాటు రక్తం వచ్చినా, శ్వాస తీసుకోవడంలో శబ్దం (వీజింగ్) వచ్చినా, లేదా వారం రోజులకంటే ఎక్కువ కొనసాగినా ఆలస్యం చేయవద్దు.
-5. Doctor Advice:
-పల్మోనాలజిస్ట్ (Pulmonologist) లేదా జనరల్ ఫిజీషియన్‌ను సంప్రదించండి. డాక్టర్ మీ ఊపిరితిత్తులను స్టెతస్కోప్‌తో పరీక్షించి చికిత్స చేస్తారు.`
-        : language === "hi-IN"
-        ? `1. क्या समझा गया: आपने खांसी की शिकायत की है। क्या यह सूखी खांसी है या कफ वाली?
-2. सरल मार्गदर्शन: गुनगुने पानी में थोड़ा नमक डालकर गरारे करें। भाप लें और पर्याप्त गुनगुना पानी पिएं। ठंडी चीजों से परहेज करें।
-3. General OTC Information:
-गले की खराश के लिए कफ लोजेंजेस (Cough Lozenges) या सामान्य हर्बल कफ सिरप सहायक हो सकते हैं। यह डॉक्टर का पर्चा नहीं है। पैकेट के निर्देश पढ़ें या फार्मासिस्ट से सलाह लें।
-4. डॉक्टर को कब दिखाएं: यदि खांसी में खून आए, सांस फूलने लगे, या खांसी 1 सप्ताह से अधिक रहे तो तुरंत डॉक्टर से मिलें।
-5. Doctor Advice:
-जनरल फिजिशियन या पल्मोनोलॉजिस्ट (Pulmonologist) से परामर्श लें। डॉक्टर आपकी छाती की जांच कर सही दवा लिख सकते हैं।`
-        : `1. WHAT MEDIMITRA UNDERSTOOD:
-You reported having a cough. (Follow-up: Is this a dry, tickling cough or is it producing phlegm/mucus?)
-
-2. SIMPLE GUIDANCE:
-- Gargle with warm salt water 2-3 times daily to soothe irritated throat tissues.
-- Inhale gentle steam from a bowl of hot water for 5-10 minutes.
-- Drink warm fluids such as warm water with lemon or herbal tea.
-- Avoid cigarette smoke, dust, and chilled iced drinks.
-
-3. General OTC Information:
-Mild throat tickle can often be relieved with over-the-counter cough lozenges, throat sprays, or simple saline drops.
-Note: This is general OTC information, not a doctor's prescription. Follow the product packaging instructions and consult a pharmacist or doctor.
-
-4. WHEN TO SEE A DOCTOR:
-Seek prompt medical care if you cough up blood, experience shortness of breath, audible wheezing, or if the cough lasts longer than 1-2 weeks.
-
-5. Doctor Advice:
-Recommended Specialist: General Physician or Pulmonologist.
-Why this specialty: A physician can auscultate your lungs, check oxygen saturation, and determine whether a bacterial infection or allergy is present.
-"A doctor can evaluate your symptoms and prescribe treatment if needed."`;
-    } else if (lower.includes("cold") || lower.includes("జలుబు") || lower.includes("सर्दी") || lower.includes("runny nose") || lower.includes("ముక్కు")) {
-      fallbackReply = language === "te-IN"
-        ? `1. ఏమి అర్థమైంది: మీరు జలుబు మరియు ముక్కు కారడం గురించి చెప్పారు.
-2. సాధారణ సూచనలు: తగినంత నిద్ర, విశ్రాంతి తీసుకోండి. రోజుకు 1-2 సార్లు వేడి నీటి ఆవిరి పట్టండి. చేతులు శుభ్రంగా కడుక్కోండి.
-3. General OTC Information:
-ముక్కు దిబ్బడ కోసం సెలైన్ నాసల్ స్ప్రే (Saline Nasal Drops) సురక్షితమైన సాధారణ OTC ఎంపిక. ఇది ప్రిస్క్రిప్షన్ కాదు. లేబుల్ సూచనలను గమనించండి.
-4. డాక్టర్‌ని ఎప్పుడు కలవాలి: ముఖంలో లేదా కళ్ళ చుట్టూ తీవ్రమైన నొప్పి, చెవి నొప్పి, లేదా తీవ్రమైన జ్వరం ఉంటే డాక్టర్‌ను సంప్రదించండి.
-5. Doctor Advice:
-ఈఎన్‌టీ స్పెషలిస్ట్ (ENT Specialist) లేదా జనరల్ ఫిజీషియన్‌ను కలవండి. డాక్టర్ మీ ముక్కు, గొంతు పరీక్షించి తగిన చికిత్స ఇస్తారు.`
-        : language === "hi-IN"
-        ? `1. क्या समझा गया: आपने सर्दी और बंद नाक के बारे में बताया है।
-2. सरल मार्गदर्शन: पूरा आराम करें, गर्म पानी पिएं, और दिन में 1-2 बार भाप लें।
-3. General OTC Information:
-नाक खोलने के लिए सामान्य सलाइन नेजल ड्रॉप्स (Saline Drops) उपयोगी हो सकते हैं। यह डॉक्टर का पर्चा नहीं है। उपयोग से पहले फार्मासिस्ट से परामर्श लें।
-4. डॉक्टर को कब दिखाएं: कान में दर्द, चेहरे पर तेज दबाव, या 7 दिनों से अधिक लक्षण रहने पर डॉक्टर से मिलें।
-5. Doctor Advice:
-ईएनटी विशेषज्ञ (ENT Specialist) या जनरल फिजिशियन से परामर्श लें। एक डॉक्टर ही लक्षणों का सही मूल्यांकन कर उपचार लिख सकते हैं।`
-        : `1. WHAT MEDIMITRA UNDERSTOOD:
-You reported having a common cold or nasal congestion. (Follow-up: Do you also have a sore throat or sinus pressure?)
-
-2. SIMPLE GUIDANCE:
-- Get ample rest and sleep to support your immune system.
-- Drink warm water, clear broths, and hot ginger/tulsi water.
-- Use facial steam inhalation to relieve nasal blockage naturally.
-- Keep a clean handkerchief and wash hands frequently.
-
-3. General OTC Information:
-Saline nasal sprays or drops provide non-medicated, soothing relief for congested sinuses.
-Note: This is general OTC information, not a doctor's prescription. Always follow package directions and ask a pharmacist before combining cold medications.
-
-4. WHEN TO SEE A DOCTOR:
-Consult a doctor if you develop high fever, sinus facial pain around the eyes, earache, or symptoms lasting over 7-10 days.
-
-5. Doctor Advice:
-Recommended Specialist: General Physician or ENT (Ear, Nose, Throat) Specialist.
-Why this specialty: An ENT or physician can inspect your sinus passages and check for secondary sinus or ear infections.
-"A doctor can evaluate your symptoms and prescribe treatment if needed."`;
-    } else if (lower.includes("stomach") || lower.includes("acidity") || lower.includes("కడుపు") || lower.includes("ఎసిడిటీ") || lower.includes("गैस") || lower.includes("पेट")) {
-      fallbackReply = language === "te-IN"
-        ? `1. ఏమి అర్థమైంది: మీరు తేలికపాటి కడుపు నొప్పి లేదా ఎసిడిటీ/గ్యాస్ గురించి చెప్పారు.
-2. సాధారణ సూచనలు: కారం, మసాలా, నూనె వస్తువులు తినకండి. ఒకేసారి ఎక్కువగా కాకుండా తక్కువ పరిమాణంలో భోజనం చేయండి. భోజనం చేసిన వెంటనే పడుకోకండి.
-3. General OTC Information:
-ఎసిడిటీకి సాధారణంగా యాంటాసిడ్ జెల్ లేదా టాబ్లెట్లు (Antacid) ఉపయోగిస్తారు. ఇది డాక్టర్ ప్రిస్క్రిప్షన్ కాదు. లేబుల్ చూసి మాత్రమే వాడండి లేదా ఫార్మసిస్ట్‌ను అడగండి.
-4. డాక్టర్‌ని ఎప్పుడు కలవాలి: తీవ్రమైన ఆకస్మిక నొప్పి, నల్లటి మల విసర్జన, వాంతులు, లేదా నొప్పి భరించలేనంతగా ఉంటే వెంటనే ఎమర్జెన్సీ హాస్పిటల్‌కు వెళ్ళాలి.
-5. Doctor Advice:
-గ్యాస్ట్రోఎంటరాలజిస్ట్ (Gastroenterologist) లేదా జనరల్ ఫిజీషియన్‌ను సంప్రదించండి. డాక్టర్ మీ కడుపుని పరీక్షించి సరైన చికిత్సను అందిస్తారు.`
-        : language === "hi-IN"
-        ? `1. क्या समझा गया: आपने पेट में हल्का दर्द या एसिडिटी/गैस के बारे में बताया है।
-2. सरल मार्गदर्शन: मसालेदार व तला-भुना खाना न खाएं। थोड़ा-थोड़ा खाना खाएं और भोजन के तुरंत बाद न सोएं।
-3. General OTC Information:
-एसिडिटी के लिए सामान्य एंटासिड (Antacid) सिरप या टैबलेट का उपयोग किया जाता है। यह डॉक्टर का पर्चा नहीं है। दवा के पैकेट के निर्देश पढ़ें या फार्मासिस्ट से पूछें।
-4. डॉक्टर को कब दिखाएं: यदि दर्द अचानक बहुत तेज हो, उल्टी में खून आए, या दर्द पीठ तक जाए तो तुरंत अस्पताल जाएं।
-5. Doctor Advice:
-गैस्ट्रोएंटेरोलॉजिस्ट (Gastroenterologist) या जनरल फिजिशियन से परामर्श लें। डॉक्टर लक्षणों का सही मूल्यांकन कर उपचार लिख सकते हैं।`
-        : `1. WHAT MEDIMITRA UNDERSTOOD:
-You reported experiencing mild stomach discomfort or acidity/gas. (Follow-up: Is the pain burning in your upper chest/stomach, and does it worsen before or after meals?)
-
-2. SIMPLE GUIDANCE:
-- Avoid spicy, oily, fried, or highly acidic foods (like citrus, sodas, and excess caffeine).
-- Eat smaller, regular meals rather than large heavy portions.
-- Remain sitting or standing upright for at least 2 hours after eating; do not lie down flat immediately.
-- Sip room-temperature water or buttermilk.
-
-3. General OTC Information:
-Over-the-counter antacids (liquid suspensions or chewable tablets) can provide temporary relief from excess stomach acid.
-Note: This is general OTC information, not a doctor's prescription. Always follow package label directions and ask a pharmacist or doctor.
-
-4. WHEN TO SEE A DOCTOR:
-Seek immediate medical attention if stomach pain is sharp, severe, or radiates to the back/shoulder, or if accompanied by repeated vomiting, black stools, or fever.
-
-5. Doctor Advice:
-Recommended Specialist: Gastroenterologist or General Physician.
-Why this specialty: A specialist can assess digestive health, evaluate for gastritis or ulcers, and prescribe appropriate therapy.
-"A doctor can evaluate your symptoms and prescribe treatment if needed."`;
-    } else {
-      fallbackReply = language === "te-IN"
-        ? `నమస్కారం! నేను మీ మెడిమిత్ర ఆరోగ్య సహాయకుడిని. మీకు ఎలాంటి ఆరోగ్య లక్షణాలు లేదా అసౌకర్యం ఉందో వివరంగా చెప్పండి (ఉదాహరణకు: తలనొప్పి, జ్వరం, దగ్గు, జలుబు, కడుపు నొప్పి). నేను మీకు తగిన సురక్షితమైన మార్గదర్శకత్వం అందిస్తాను.
-గమనిక: ఇది సమాచార సూచన మాత్రమే, వైద్య నిర్ధారణ కాదు.`
-        : language === "hi-IN"
-        ? `नमस्ते! मैं आपका मेडीमित्र स्वास्थ्य सहायक हूँ। आपको जो भी स्वास्थ्य लक्षण या परेशानी हो (जैसे: सिरदर्द, बुखार, खांसी, सर्दी, पेट दर्द), बताएं। मैं सुरक्षित और उपयोगी मार्गदर्शन दूंगा।
-नोट: यह केवल सामान्य जानकारी है, डॉक्टरी निदान नहीं।`
-        : `Hello! I am your MediMitra health companion. Please describe any symptoms you are experiencing (for example: headache, fever, cough, cold, mild stomach discomfort, or acidity). I will provide clear, relevant guidance, general OTC facts, and doctor recommendations.
-(Note: This is informational wellness guidance, not a medical diagnosis.)`;
-    }
+    // High quality intelligent fallback honoring short default vs. detailed on demand, history memory, and general chat
+    const fallbackReply = generateIntelligentAssistantFallback(
+      userMessage,
+      language,
+      isDetailed,
+      userContext?.name || "Friend",
+      rawHistory
+    );
 
     return res.json({ reply: fallbackReply });
   } catch (err: any) {
     console.error("Error in /api/assistant/chat:", err);
     return res.status(500).json({
-      reply: "MediMitra assistant is currently operating in offline mode. Please feel free to check your health tracking dashboard.",
+      reply: "MediMitra is currently in offline mode. Please feel free to check your health tracking dashboard.",
       error: err?.message,
     });
   }
@@ -580,30 +995,41 @@ Why this specialty: A specialist can assess digestive health, evaluate for gastr
 // AI Health Assistant Streaming endpoint (Server-Sent Events)
 app.post("/api/assistant/chat-stream", async (req: Request, res: Response) => {
   const { message, messages, language = "en-IN", userContext = {} } = req.body;
-  const userMessage = message || (messages && messages.length > 0 ? messages[messages.length - 1].content || messages[messages.length - 1].text : "");
+  const userMessage = message || (Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1].content || messages[messages.length - 1].text : "");
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
 
   const client = getGeminiClient();
+  const { systemPrompt, isDetailed } = buildMediMitraSystemPrompt(userMessage, language, userContext);
+
+  const rawHistory = Array.isArray(messages) && messages.length > 0
+    ? messages
+    : [{ role: "user", content: userMessage }];
+
+  const geminiContents = rawHistory
+    .filter((m: any) => Boolean(m.content || m.text))
+    .map((m: any) => ({
+      role: (m.role === "assistant" || m.role === "model" || m.sender === "assistant") ? "model" : "user",
+      parts: [{ text: String(m.content || m.text).trim() }],
+    }));
+
+  if (geminiContents.length === 0 || geminiContents[geminiContents.length - 1].role !== "user") {
+    geminiContents.push({
+      role: "user",
+      parts: [{ text: userMessage }],
+    });
+  }
 
   if (!client) {
-    // If no client, return safe localized fallback via SSE
-    const fallback = language === "te-IN"
-      ? `నమస్కారం! నేను మీ మెడిమిత్ర ఆరోగ్య సహాయకుడిని. మీ ప్రశ్నను పరిశీలించాను.
-1. అర్థం చేసుకున్న లక్షణాలు: మీరు తెలిపిన ఆరోగ్య లక్షణాలు సాధారణ అలసట లేదా వాతావరణ మార్పులతో రావచ్చు.
-2. సూచన: తగినంత విశ్రాంతి తీసుకోండి, పుష్కలంగా నీరు తాగండి.
-3. డాక్టర్ సలహా: లక్షణాలు 2-3 రోజులకు మించి ఉంటే సాధారణ వైద్యులను (General Physician) సంప్రదించండి.`
-      : language === "hi-IN"
-      ? `नमस्ते! मैं आपका मेडीमित्र स्वास्थ्य साथी हूं।
-1. क्या समझा गया: आपके लक्षण सामान्य थकान या मौसम के बदलाव से हो सकते हैं।
-2. सलाह: पर्याप्त आराम करें और पानी पिएं।
-3. डॉक्टर की सलाह: लक्षण 2-3 दिनों से अधिक रहें तो सामान्य चिकित्सक से परामर्श लें।`
-      : `Hello! I am your MediMitra health companion.
-1. What was understood: Your reported symptoms may be related to temporary strain or dehydration.
-2. Immediate guidance: Rest well and hydrate continuously.
-3. Doctor advice: If symptoms persist beyond 2-3 days, please consult a General Physician.`;
+    const fallback = generateIntelligentAssistantFallback(
+      userMessage,
+      language,
+      isDetailed,
+      userContext?.name || "Friend",
+      rawHistory
+    );
 
     res.write(`data: ${JSON.stringify({ text: fallback })}\n\n`);
     res.write(`data: [DONE]\n\n`);
@@ -611,61 +1037,63 @@ app.post("/api/assistant/chat-stream", async (req: Request, res: Response) => {
     return;
   }
 
-  try {
-    const langName = language === "te-IN" ? "Telugu" : language === "hi-IN" ? "Hindi" : "English";
-    const systemPrompt = `You are MediMitra, a caring, respectful, and medically accurate AI Health Companion.
-Target Patient: ${userContext.name || "Patient"}, Age: ${userContext.age || "Adult"}, Location: ${userContext.userLocationArea || "Telangana / Andhra Pradesh, India"}.
-Selected Language: ${langName} (${language}).
+  const candidateModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite"];
+  let streamStarted = false;
 
-STRICT LANGUAGE INTEGRITY:
-- Respond SOLELY in ${langName}.
-- NEVER combine or concatenate translations from other languages.
+  for (const model of candidateModels) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const stream = await client.models.generateContentStream({
+          model,
+          config: {
+            systemInstruction: systemPrompt,
+            temperature: 0.3,
+          },
+          contents: geminiContents,
+        });
 
-STRICT NO-MARKUP RULE:
-- ABSOLUTELY NEVER output raw SVG, <svg>, XML, or HTML tags.
-
-TELUGU TONE (if Telugu):
-- Warm, caring family doctor or elder. Simple spoken Telugu with natural medical words (షుగర్, బీపీ, టాబ్లెట్, హాస్పిటల్).
-
-6-POINT GUIDANCE:
-1. What the symptom may commonly be related to
-2. What you can safely do now (Immediate self-care, hydration, rest)
-3. Things to avoid
-4. When to see a doctor
-5. Emergency warning signs
-6. Doctor Advice (Specialist recommendation and reminder that only a doctor diagnoses/prescribes)`;
-
-    const stream = await client.models.generateContentStream({
-      model: "gemini-3.8-flash",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text: `${systemPrompt}\n\nPatient Query: ${userMessage}\n\nMediMitra response:`,
-            },
-          ],
-        },
-      ],
-    });
-
-    for await (const chunk of stream) {
-      if (chunk.text) {
-        const cleaned = sanitizeAiText(chunk.text);
-        if (cleaned) {
-          res.write(`data: ${JSON.stringify({ text: cleaned })}\n\n`);
+        for await (const chunk of stream) {
+          if (chunk.text) {
+            const cleaned = sanitizeAiText(chunk.text);
+            if (cleaned) {
+              streamStarted = true;
+              res.write(`data: ${JSON.stringify({ text: cleaned })}\n\n`);
+            }
+          }
         }
+
+        if (streamStarted) {
+          res.write(`data: [DONE]\n\n`);
+          res.end();
+          return;
+        }
+      } catch (streamErr: any) {
+        const errStr = String(streamErr?.message || "");
+        const status = streamErr?.status || streamErr?.code;
+        const isUnavailable = status === 503 || status === "UNAVAILABLE" || errStr.includes("high demand");
+
+        if (isUnavailable && attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          continue;
+        }
+
+        console.log(`[Gemini API Stream] Model ${model} unavailable (${status || "unknown"}), trying next model...`);
+        break;
       }
     }
-
-    res.write(`data: [DONE]\n\n`);
-    res.end();
-  } catch (streamErr: any) {
-    console.error("Stream generation failed, falling back:", streamErr);
-    res.write(`data: ${JSON.stringify({ text: "MediMitra is currently in offline mode. Please consult a doctor for urgent care." })}\n\n`);
-    res.write(`data: [DONE]\n\n`);
-    res.end();
   }
+
+  // Fallback if all streams failed
+  const fallback = generateIntelligentAssistantFallback(
+    userMessage,
+    language,
+    isDetailed,
+    userContext?.name || "Friend",
+    rawHistory
+  );
+  res.write(`data: ${JSON.stringify({ text: fallback })}\n\n`);
+  res.write(`data: [DONE]\n\n`);
+  res.end();
 });
 
 // Smart Symptom Guidance endpoint
@@ -694,18 +1122,25 @@ Format output as JSON with this exact structure:
 Only output valid JSON.`;
 
     if (client) {
-      const response = await client.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: { responseMimeType: "application/json" },
-      });
-
-      if (response.text) {
+      const symptomModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite"];
+      for (const model of symptomModels) {
         try {
-          const parsed = JSON.parse(response.text);
-          return res.json(parsed);
-        } catch (e) {
-          // fallback to standard json
+          const response = await client.models.generateContent({
+            model,
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: { responseMimeType: "application/json" },
+          });
+
+          if (response.text) {
+            try {
+              const parsed = JSON.parse(response.text);
+              return res.json(parsed);
+            } catch (e) {
+              // fallback to standard json
+            }
+          }
+        } catch (err) {
+          console.log(`[Gemini API] Symptom check model ${model} unavailable, trying next...`);
         }
       }
     }
@@ -740,6 +1175,288 @@ Only output valid JSON.`;
     console.error("Error in /api/symptom/check:", err);
     return res.status(500).json({ error: "Failed to generate symptom guidance" });
   }
+});
+
+// ============================================================
+// REAL NEARBY PLACES / DOCTORS & HEALTHCARE PROVIDERS ENDPOINT
+// ============================================================
+
+function calculateHaversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Earth's radius in km
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Number((R * c).toFixed(2));
+}
+
+function mapGooglePlaceType(primaryType?: string, types?: string[]): { type: string; specialty: string } {
+  const all = [primaryType, ...(types || [])].filter(Boolean) as string[];
+  if (all.includes("hospital")) return { type: "Hospital", specialty: "Emergency & Inpatient Medicine" };
+  if (all.includes("dentist") || all.includes("dental_clinic")) return { type: "Dental Clinic", specialty: "Dental Surgery & Orthodontics" };
+  if (all.includes("physiotherapist")) return { type: "Physiotherapy Center", specialty: "Physical Therapy & Rehabilitation" };
+  if (all.includes("medical_clinic")) return { type: "Medical Clinic", specialty: "Outpatient Family Care" };
+  if (all.includes("pediatrician")) return { type: "Pediatric Clinic", specialty: "Child Healthcare" };
+  if (all.includes("doctor")) return { type: "Doctor / Physician", specialty: "General Practice & Consultation" };
+  return { type: "Healthcare Provider", specialty: "General Healthcare" };
+}
+
+app.all("/api/places/nearby-doctors", async (req: Request, res: Response) => {
+  try {
+    const latParam = req.query.lat ?? req.body?.lat;
+    const lngParam = req.query.lng ?? req.body?.lng;
+    const radiusParam = req.query.radius ?? req.body?.radius ?? 5000;
+    const providerParam = (req.query.provider ?? req.body?.provider ?? "google") as string;
+
+    const lat = parseFloat(String(latParam));
+    const lng = parseFloat(String(lngParam));
+    const radius = Math.min(10000, Math.max(500, parseFloat(String(radiusParam)) || 5000)); // 5 km default
+
+    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return res.status(400).json({
+        success: false,
+        error: "INVALID_COORDINATES",
+        message: "Valid numeric latitude (-90 to 90) and longitude (-180 to 180) are required.",
+      });
+    }
+
+    const googleApiKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_PLACES_API_KEY;
+
+    // OpenStreetMap Nominatim (real geospatial open data provider)
+    if (providerParam === "osm") {
+      try {
+        const radiusKm = radius / 1000;
+        const deltaLat = radiusKm / 111.0;
+        const deltaLng = radiusKm / (111.0 * Math.cos((lat * Math.PI) / 180));
+        const viewbox = `${lng - deltaLng},${lat + deltaLat},${lng + deltaLng},${lat - deltaLat}`;
+
+        // Query real clinics, hospitals, and doctors within the bounding box
+        const queries = ["clinic", "hospital", "doctor"];
+        const fetchPromises = queries.map(async (q) => {
+          const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=25&viewbox=${viewbox}&bounded=1`;
+          const resp = await fetch(url, {
+            headers: {
+              "User-Agent": "MediMitraApp/1.0 (healthcare-locator)",
+              "Accept": "application/json",
+            },
+          });
+          if (!resp.ok) return [];
+          const items: any = await resp.json();
+          return Array.isArray(items) ? items : [];
+        });
+
+        const queryResults = await Promise.all(fetchPromises);
+        const allItems = queryResults.flat();
+
+        const seenPlaceIds = new Set<string>();
+        const places: any[] = [];
+
+        for (const item of allItems) {
+          const itemPlaceId = String(item.place_id || item.osm_id);
+          if (seenPlaceIds.has(itemPlaceId)) continue;
+          seenPlaceIds.add(itemPlaceId);
+
+          const itemLat = parseFloat(item.lat);
+          const itemLng = parseFloat(item.lon);
+          if (isNaN(itemLat) || isNaN(itemLng)) continue;
+
+          const dist = calculateHaversineDistanceKm(lat, lng, itemLat, itemLng);
+          if (dist > radiusKm + 0.1) continue;
+
+          const rawType = item.type || item.class || "clinic";
+          const typeName = rawType === "hospital" ? "Hospital" : rawType === "clinic" ? "Medical Clinic" : "Doctor / Clinic";
+          const specialty = rawType === "hospital" ? "Emergency & Inpatient Care" : rawType === "dentist" ? "Dental Care" : "General Healthcare & Consultation";
+
+          const addrObj = item.address || {};
+          const addrParts = [
+            addrObj.road || addrObj.street,
+            addrObj.suburb || addrObj.neighbourhood || addrObj.residential,
+            addrObj.city || addrObj.town || addrObj.village || addrObj.county,
+            addrObj.postcode,
+          ].filter(Boolean);
+          const formattedAddr = addrParts.length > 0 ? addrParts.join(", ") : (item.display_name?.split(",").slice(0, 4).join(",") || "Address details on map");
+
+          places.push({
+            id: `osm-${item.osm_type || 'node'}-${item.osm_id || item.place_id}`,
+            name: item.name || item.display_name?.split(",")[0] || `${typeName} (${specialty})`,
+            type: typeName,
+            specialty,
+            clinic: item.name || item.display_name?.split(",")[0] || `${typeName} Facility`,
+            address: formattedAddr,
+            distanceKm: dist,
+            phone: addrObj.phone || null,
+            rating: null,
+            experienceYears: undefined,
+            availableToday: true,
+            languages: ["English", "Local Language"],
+            lat: itemLat,
+            lng: itemLng,
+            source: "openstreetmap",
+            directionsUrl: `https://www.google.com/maps/dir/?api=1&destination=${itemLat},${itemLng}`,
+          });
+        }
+
+        places.sort((a, b) => a.distanceKm - b.distanceKm);
+
+        return res.json({
+          success: true,
+          count: places.length,
+          data: places,
+          userCoordinates: { lat, lng },
+          radiusKm: radius / 1000,
+          provider: "openstreetmap",
+          hasGoogleKey: Boolean(googleApiKey),
+        });
+      } catch (osmErr: any) {
+        console.error("OpenStreetMap query error:", osmErr);
+        return res.status(502).json({
+          success: false,
+          error: "OSM_FETCH_FAILED",
+          message: "Failed to query OpenStreetMap real geospatial database.",
+          details: osmErr?.message,
+        });
+      }
+    }
+
+    // Google Places API (New) provider
+    if (!googleApiKey) {
+      // STRICT REQUIREMENT: If no API is configured, DO NOT show fake results. Clearly tell which API and API key are required.
+      return res.status(200).json({
+        success: false,
+        error: "API_KEY_REQUIRED",
+        apiRequired: "Google Places API (New) / Google Maps Platform",
+        envVariable: "GOOGLE_MAPS_API_KEY",
+        userCoordinates: { lat, lng },
+        radiusKm: radius / 1000,
+        message: "Google Places API key is required to query live nearby doctors, clinics, and hospitals. Please set GOOGLE_MAPS_API_KEY in your environment variables (.env). In accordance with instructions, MediMitra does NOT fabricate or display fake doctor data.",
+        osmAvailable: true,
+      });
+    }
+
+    // Call Google Places API (New) Nearby Search
+    const gUrl = "https://places.googleapis.com/v1/places:searchNearby";
+    const gBody = {
+      includedTypes: [
+        "doctor",
+        "medical_clinic",
+        "hospital",
+        "physiotherapist",
+        "dentist",
+      ],
+      maxResultCount: 20,
+      locationRestriction: {
+        circle: {
+          center: { latitude: lat, longitude: lng },
+          radius: radius,
+        },
+      },
+    };
+
+    const gRes = await fetch(gUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": googleApiKey,
+        "X-Goog-FieldMask": "places.id,places.displayName,places.primaryType,places.types,places.formattedAddress,places.location,places.nationalPhoneNumber,places.internationalPhoneNumber,places.rating,places.userRatingCount,places.googleMapsUri,places.regularOpeningHours",
+      },
+      body: JSON.stringify(gBody),
+    });
+
+    if (!gRes.ok) {
+      const errText = await gRes.text().catch(() => "");
+      let parsedErr: any = null;
+      try { parsedErr = JSON.parse(errText); } catch {}
+      console.error("Google Places API error:", gRes.status, errText);
+
+      return res.status(gRes.status >= 500 ? 502 : 400).json({
+        success: false,
+        error: "GOOGLE_PLACES_ERROR",
+        apiRequired: "Google Places API (New)",
+        envVariable: "GOOGLE_MAPS_API_KEY",
+        status: gRes.status,
+        message: parsedErr?.error?.message || `Google Places API request failed with status ${gRes.status}`,
+        userCoordinates: { lat, lng },
+        osmAvailable: true,
+      });
+    }
+
+    const gData: any = await gRes.json();
+    const rawPlaces = gData.places || [];
+
+    const doctors = rawPlaces.map((p: any) => {
+      const pLat = p.location?.latitude;
+      const pLng = p.location?.longitude;
+      const dist = (pLat && pLng) ? calculateHaversineDistanceKm(lat, lng, pLat, pLng) : 0;
+      const { type, specialty } = mapGooglePlaceType(p.primaryType, p.types);
+      const phone = p.nationalPhoneNumber || p.internationalPhoneNumber || null;
+      const name = p.displayName?.text || "Medical Facility";
+
+      return {
+        id: p.id || `gplace-${Math.random()}`,
+        name,
+        specialty,
+        type,
+        clinic: name,
+        address: p.formattedAddress || "Address not provided",
+        distanceKm: dist,
+        phone,
+        rating: p.rating || null,
+        ratingCount: p.userRatingCount || 0,
+        isOpenNow: p.regularOpeningHours?.openNow ?? null,
+        lat: pLat,
+        lng: pLng,
+        source: "google_places",
+        directionsUrl: p.googleMapsUri || `https://www.google.com/maps/dir/?api=1&destination=${pLat},${pLng}`,
+        availableToday: true,
+      };
+    })
+    .sort((a: any, b: any) => a.distanceKm - b.distanceKm);
+
+    return res.json({
+      success: true,
+      count: doctors.length,
+      data: doctors,
+      userCoordinates: { lat, lng },
+      radiusKm: radius / 1000,
+      provider: "google_places",
+    });
+
+  } catch (apiErr: any) {
+    console.error("Error in /api/places/nearby-doctors:", apiErr);
+    return res.status(500).json({
+      success: false,
+      error: "SERVER_ERROR",
+      message: "An internal server error occurred while searching for nearby healthcare providers.",
+      details: apiErr?.message,
+    });
+  }
+});
+
+// Prevent ANY /api/* request from ever reaching Vite middleware or HTML static serving
+app.all("/api/*", (req: Request, res: Response) => {
+  res.status(404).json({
+    success: false,
+    error: "API_ENDPOINT_NOT_FOUND",
+    message: `API endpoint '${req.method} ${req.path}' does not exist on this backend.`,
+  });
+});
+
+// Global JSON error handler for /api routes
+app.use((err: any, req: Request, res: Response, next: any) => {
+  if (req.path && req.path.startsWith("/api/")) {
+    console.error("API error caught:", err);
+    return res.status(err.status || 500).json({
+      success: false,
+      error: "INTERNAL_SERVER_ERROR",
+      message: err.message || "An unexpected error occurred in backend API.",
+    });
+  }
+  next(err);
 });
 
 // Vite middleware or static serving

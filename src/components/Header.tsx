@@ -29,7 +29,7 @@ export const Header: React.FC = () => {
   const t = TRANSLATIONS[language];
 
   return (
-    <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-blue-100 shadow-xs">
+    <header className="sticky top-0 z-30 bg-white/85 backdrop-blur-md border-b border-teal-100/80 shadow-xs">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 sm:h-20">
           
@@ -39,15 +39,15 @@ export const Header: React.FC = () => {
             onClick={() => setActiveTab('home')}
             className="flex items-center gap-3 cursor-pointer group"
           >
-            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl bg-gradient-to-tr from-blue-600 to-blue-500 text-white flex items-center justify-center shadow-md shadow-blue-500/20 group-hover:scale-105 transition-transform">
+            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl bg-gradient-to-tr from-teal-600 via-cyan-600 to-blue-600 text-white flex items-center justify-center shadow-md shadow-teal-500/25 group-hover:scale-105 transition-transform">
               <HeartPulse className="w-6 h-6 sm:w-7 sm:h-7" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-display font-extrabold text-xl sm:text-2xl tracking-tight text-blue-950">
-                  Medi<span className="text-blue-600">Mitra</span>
+                <span className="font-display font-extrabold text-xl sm:text-2xl tracking-tight text-slate-900">
+                  Medi<span className="text-teal-600">Mitra</span>
                 </span>
-                <span className="hidden md:inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                <span className="hidden md:inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-teal-50 text-teal-700 border border-teal-200/80">
                   Health AI
                 </span>
               </div>
@@ -64,10 +64,10 @@ export const Header: React.FC = () => {
             <button
               id="header-talk-btn"
               onClick={() => setIsVoiceAssistantOpen(true)}
-              className="inline-flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs sm:text-sm shadow-md shadow-blue-600/25 transition-all hover:scale-[1.02] active:scale-[0.98]"
+              className="inline-flex items-center gap-2 px-3.5 sm:px-4.5 py-2 rounded-xl bg-gradient-to-r from-teal-600 via-teal-700 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white font-bold text-xs sm:text-sm shadow-md shadow-teal-600/25 transition-all hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
               title={t.talkToMediMitra}
             >
-              <Mic className="w-4 h-4 text-blue-100 animate-pulse" />
+              <Mic className="w-4 h-4 text-teal-100 animate-pulse" />
               <span className="hidden xs:inline">{t.talkToMediMitra}</span>
               <span className="xs:hidden">Talk</span>
             </button>
@@ -75,13 +75,13 @@ export const Header: React.FC = () => {
             {/* Language Selector */}
             <div className="relative">
               <label htmlFor="language-select" className="sr-only">Select Language</label>
-              <div className="flex items-center bg-blue-50/60 rounded-xl p-1 border border-blue-200">
-                <Languages className="w-4 h-4 text-blue-600 ml-1.5 mr-1" />
+              <div className="flex items-center bg-teal-50/80 rounded-xl p-1 border border-teal-200/80">
+                <Languages className="w-4 h-4 text-teal-600 ml-1.5 mr-1" />
                 <select
                   id="language-select"
                   value={language}
                   onChange={(e) => setLanguage(e.target.value as AppLanguage)}
-                  className="bg-transparent text-xs sm:text-sm font-semibold text-blue-950 focus:outline-none cursor-pointer py-1 pr-2"
+                  className="bg-transparent text-xs sm:text-sm font-bold text-teal-950 focus:outline-none cursor-pointer py-1 pr-2"
                 >
                   <option value="en-IN">English</option>
                   <option value="te-IN">తెలుగు</option>
@@ -94,10 +94,10 @@ export const Header: React.FC = () => {
             <button
               id="toggle-easy-mode-btn"
               onClick={() => setEasyMode(!easyMode)}
-              className={`p-2 rounded-xl border text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition-colors ${
+              className={`p-2 rounded-xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
                 easyMode
                   ? 'bg-amber-100 border-amber-300 text-amber-900 shadow-xs'
-                  : 'bg-slate-100 border-slate-200 text-slate-600 hover:bg-slate-200'
+                  : 'bg-slate-100/90 border-slate-200 text-slate-600 hover:bg-slate-200'
               }`}
               title="Toggle Easy / Accessible Mode"
             >
@@ -109,7 +109,7 @@ export const Header: React.FC = () => {
             <button
               id="header-emergency-btn"
               onClick={() => setActiveTab('emergency')}
-              className="p-2 sm:px-3 sm:py-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-100 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-colors shadow-xs"
+              className="p-2 sm:px-3 sm:py-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-100 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
               title={t.emergencySupport}
             >
               <PhoneCall className="w-4 h-4 text-rose-600 animate-bounce" />
@@ -122,10 +122,10 @@ export const Header: React.FC = () => {
                 <button
                   id="header-profile-btn"
                   onClick={() => setActiveTab('profile')}
-                  className="flex items-center gap-2 p-1.5 sm:px-2.5 sm:py-1.5 rounded-xl hover:bg-blue-50 border border-blue-200 transition-colors"
+                  className="flex items-center gap-2 p-1.5 sm:px-2.5 sm:py-1.5 rounded-xl hover:bg-teal-50 border border-teal-200/80 transition-colors cursor-pointer"
                   title="Profile"
                 >
-                  <div className="w-7 h-7 rounded-full bg-blue-100 text-blue-800 flex items-center justify-center font-bold text-xs">
+                  <div className="w-7 h-7 rounded-full bg-teal-100 text-teal-800 flex items-center justify-center font-bold text-xs">
                     {user.name ? user.name[0] : 'U'}
                   </div>
                   <span className="text-xs font-semibold text-slate-800 hidden xl:inline">
@@ -135,7 +135,7 @@ export const Header: React.FC = () => {
                 <button
                   id="header-logout-btn"
                   onClick={logout}
-                  className="p-2 text-slate-400 hover:text-rose-600 transition-colors"
+                  className="p-2 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
                   title={t.logout}
                 >
                   <LogOut className="w-4 h-4" />
@@ -145,7 +145,7 @@ export const Header: React.FC = () => {
               <button
                 id="header-demo-login-btn"
                 onClick={loginDemoUser}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-all shadow-xs"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold transition-all shadow-xs cursor-pointer"
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 <span>Demo User</span>
