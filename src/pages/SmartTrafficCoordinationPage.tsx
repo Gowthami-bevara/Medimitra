@@ -35,9 +35,9 @@ export const SmartTrafficCoordinationPage: React.FC = () => {
   const t = TRANSLATIONS[language];
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 space-y-5 sm:space-y-6">
       {/* Header Banner */}
-      <div className="bg-white/92 backdrop-blur-xl rounded-3xl p-6 sm:p-8 border border-teal-100/90 shadow-xl shadow-teal-950/5 flex flex-col md:flex-row md:items-center justify-between gap-5">
+      <div className="bg-white/92 backdrop-blur-xl rounded-3xl p-5 sm:p-8 border border-teal-100/90 shadow-xl shadow-teal-950/5 flex flex-col md:flex-row md:items-center justify-between gap-4 sm:gap-5">
         <div>
           <div className="flex items-center gap-2 mb-2">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></span>

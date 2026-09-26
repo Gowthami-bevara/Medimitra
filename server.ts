@@ -527,6 +527,64 @@ export function isGeneralConversation(query: string): boolean {
   return false;
 }
 
+// Normalize multi-turn contents for Gemini API:
+// 1. Drops leading model turns (e.g. initial welcome message)
+// 2. Merges consecutive turns of the same role
+// 3. Guarantees alternating user/model sequence ending with user
+export function normalizeGeminiContents(
+  rawHistory: any[],
+  currentUserMessage: string
+): Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> {
+  const normalized: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [];
+
+  for (const item of rawHistory) {
+    const text = String(item.content || item.text || "").trim();
+    if (!text) continue;
+    const role: "user" | "model" =
+      item.role === "assistant" || item.role === "model" || item.sender === "assistant"
+        ? "model"
+        : "user";
+
+    // Gemini requires the FIRST turn to be from 'user'. Drop leading assistant/model greetings
+    if (normalized.length === 0 && role === "model") {
+      continue;
+    }
+
+    // Merge consecutive turns with the same role
+    if (normalized.length > 0 && normalized[normalized.length - 1].role === role) {
+      normalized[normalized.length - 1].parts[0].text += `\n${text}`;
+    } else {
+      normalized.push({ role, parts: [{ text }] });
+    }
+  }
+
+  // Ensure the latest user message is preserved at the end with role 'user'
+  const userText = String(currentUserMessage || "").trim();
+  if (normalized.length === 0) {
+    if (userText) {
+      normalized.push({ role: "user", parts: [{ text: userText }] });
+    }
+  } else {
+    const last = normalized[normalized.length - 1];
+    if (last.role === "user") {
+      if (userText && !last.parts[0].text.includes(userText)) {
+        last.parts[0].text = userText;
+      }
+    } else {
+      if (userText) {
+        normalized.push({ role: "user", parts: [{ text: userText }] });
+      }
+    }
+  }
+
+  // Fallback sanity check
+  if (normalized.length === 0) {
+    normalized.push({ role: "user", parts: [{ text: userText || "Hello" }] });
+  }
+
+  return normalized;
+}
+
 // Prompt builder respecting answer length (short by default, detailed on demand) and dual health/general modes
 export function buildMediMitraSystemPrompt(
   userMessage: string,
@@ -541,51 +599,50 @@ Target User: ${userContext.name || "Friend"}, Location: ${userContext.userLocati
 Selected Language: ${langName} (${language}).
 
 CRITICAL HIGHEST PRIORITY DIRECTIVES:
-1. ANSWER THE EXACT QUESTION:
-   - Always understand the user's specific intent and directly answer the exact question asked.
-   - DO NOT provide canned introductory phrases or generic templates.
+1. ALWAYS IDENTIFY THE USER'S INTENT BEFORE RESPONDING:
+   - Understand the exact question asked and answer that exact question directly.
+   - Direct answer first. No unnecessary introduction. No unnecessary disclaimer at the beginning.
+2. DO NOT GIVE GENERIC MESSAGES:
    - NEVER say "I am MedMitra, your health assistant...", "MedMitra provides personalized wellness insights...", or "Please consult a doctor" as the entire answer.
    - Never repeat the same generic response for different questions.
-
-2. DUAL CAPABILITY (GENERAL & HEALTH):
-   - GENERAL CONVERSATIONS (greetings, daily life, general knowledge, math, science, current affairs, jokes, casual chat):
-     * Answer naturally, conversationally, and directly like a knowledgeable assistant.
-     * DO NOT force or redirect normal/general questions to healthcare or medical topics.
-     * Examples:
-       - "Who is the Prime Minister of India?" -> Answer directly: "The Prime Minister of India is Narendra Modi."
-       - "What is 25 + 37?" -> Answer directly: "62."
-       - "Tell me a joke." -> Tell a witty, clean, short joke.
-       - "How are you doing today?" -> Respond warmly and ask how their day is going.
-   - HEALTH CONVERSATIONS (symptoms, fever, colds, headache, blood pressure, diabetes, nutrition, sleep):
-     * Give a direct, practical, and safe answer to the specific health question first.
-     * Explain what is happening in simple, reassuring words.
-     * Provide practical general care advice, lifestyle tips, and warning signs without pretending to diagnose or prescribe.
-     * Recommend doctors or emergency care (108) ONLY when there are genuine red flags (chest pain, acute breathing difficulty, unconsciousness, severe persistent pain). Do NOT recommend emergency care for mild, everyday symptoms.
-
-3. ANSWER LENGTH DIRECTIVE:
-${
-  isDetailed
-    ? `   * DETAIL LEVEL: HIGH / DETAILED.
-     - The user explicitly asked for an in-depth or detailed explanation ("explain in detail", "detailed ga cheppu", "inka explain cheyyi", "వివరంగా చెప్పు", "विस्तार से बताओ", etc.).
-     - Provide a comprehensive, well-structured answer with clear sections, helpful practical guidance, mechanisms, and examples where appropriate. Keep it organized and engaging.`
-    : `   * DETAIL LEVEL: SHORT & CONCISE (DEFAULT).
-     - The user did NOT ask for a long essay. Keep your answer SHORT, clear, and easy to understand.
-     - Provide approximately 2 to 5 short sentences or a few concise bullet points.
-     - Avoid filler or unsolicited long paragraphs.`
-}
-
-4. CONVERSATION CONTEXT & FOLLOW-UPS:
+3. DO NOT UNNECESSARILY REDIRECT NORMAL/GENERAL QUESTIONS TO HEALTHCARE:
+   - For general conversation, respond naturally like a normal helpful assistant.
+   - For health questions, give a direct, useful and safe answer related to the specific health question.
+4. ANSWER LENGTH DIRECTIVE:
+   - Short by default: If the user asks a simple question, give a SHORT answer (2 to 4 clear, concise sentences).
+   - Detailed only when requested: If the user explicitly asks for details, explanation, examples, or comprehensive information ("explain in detail", "detailed ga cheppu", "వివరంగా చెప్పు", "विस्तार से बताओ"), provide a structured, in-depth explanation.
+5. CONVERSATION CONTEXT & FOLLOW-UPS:
    - You have access to previous turns in the conversation.
-   - Always remember the conversation context and answer follow-up questions accurately based on prior messages (e.g., "What did I ask you earlier?", "Why?", "Explain more about that").
+   - Remember the conversation context and answer follow-up questions accurately based on previous messages (e.g. "What did I ask you earlier?", "Why?", "Explain more about that").
 
-5. STRICT LANGUAGE PURITY & NATURAL TONE:
-   - Always respond SOLELY in the chosen language (${langName}).
-   - Telugu (${language === "te-IN"}): Warm, natural conversational Telugu (common terms like షుగర్, బీపీ, టాబ్లెట్, ఫీవర్, డాక్టర్ are widely understood and natural).
-   - Hindi (${language === "hi-IN"}): Natural, polite, everyday Hindi.
-   - English: Clear, empathetic, concise, and professional.
+FEW-SHOT EXAMPLES TO FOLLOW STRICTLY:
+- User: "What is fever?"
+  Assistant: Explain what fever is in simple words (e.g., a natural immune reaction where body temperature rises above 100.4°F/38°C to fight an infection. Usually subsides with rest and fluids).
+- User: "Why do I have a headache?"
+  Assistant: Give relevant possible common causes (dehydration, eye strain, lack of sleep, stress) and safe next steps, without pretending to diagnose.
+- User: "What should I do for a mild cold?"
+  Assistant: Give practical general care advice (warm fluids, steam inhalation, rest) and warning signs (high persistent fever, breathing difficulty).
+- User: "Who is the Prime Minister of India?"
+  Assistant: Answer directly: "The Prime Minister of India is Narendra Modi." Do not talk about MedMitra or health.
+- User: "What is 25 + 37?"
+  Assistant: "62."
+- User: "Tell me a joke."
+  Assistant: Tell a short, witty, clean joke.
+- User: "What did I ask you earlier?"
+  Assistant: Use the conversation context from the chat history and answer correctly.
 
-6. STRICT NO-MARKUP RULE:
-   - Never output SVG, XML, or HTML tags. Provide clean markdown or plain text only.`;
+LANGUAGE RULES:
+- Reply in the same language used by the user whenever possible (${langName}).
+- If Telugu is selected (${language === "te-IN"}): respond in natural, simple Telugu. Avoid unnatural machine-translated Telugu. Do not randomly mix English into Telugu unless the user uses it or the term is commonly used (like బీపీ, షుగర్, టాబ్లెట్, డాక్టర్).
+- If Hindi is selected (${language === "hi-IN"}): respond in natural, polite Hindi.
+- If English is selected: respond in clear, empathetic, direct English.
+
+HEALTH SAFETY RULES:
+- Do not claim a definite diagnosis from symptoms alone.
+- Do not prescribe prescription medicines based only on symptoms.
+- For serious warning signs (chest pain, severe breathing trouble, sudden loss of consciousness), clearly advise seeking immediate emergency care (dial 108).
+- Keep safety guidance relevant to the actual question.
+- Clean plain text or markdown only. Never output raw SVG, XML, or HTML tags.`;
 
   return { systemPrompt, isDetailed };
 }
@@ -881,7 +938,7 @@ export function generateIntelligentAssistantFallback(
     return `Healthy adults should generally drink about 2.5 to 3 liters of water daily. Sip consistently across the day to stay comfortably hydrated.`;
   }
 
-  // 12. SLEEP / REST
+  // 12. SLEEP / REST / INSOMNIA
   if (lower.includes("sleep") || lower.includes("నిద్ర") || lower.includes("నీంద") || lower.includes("insomnia")) {
     if (language === "te-IN") {
       return `రాత్రి 7 నుండి 8 గంటల నిద్ర శరీరానికి మరియు మనస్సుకు ఎంతో అవసరం. పడుకునే అరగంట ముందు ఫోన్ స్క్రీన్ పక్కనపెట్టి ప్రశాంతమైన వాతావరణంలో విశ్రాంతి తీసుకోండి.`;
@@ -892,20 +949,86 @@ export function generateIntelligentAssistantFallback(
     return `Aim for 7 to 8 hours of restful sleep each night. Putting screens away 30 minutes before bed significantly enhances restorative sleep.`;
   }
 
-  // 13. DIRECT ANSWER FOR GENERAL INQUIRIES
+  // 13. DIABETES / SUGAR
+  if (lower.includes("sugar") || lower.includes("diabetes") || lower.includes("షుగర్") || lower.includes("డయాబెటిస్") || lower.includes("मधुमेह")) {
+    if (language === "te-IN") {
+      return `రక్తంలో గ్లూకోజ్ స్థాయిలు సాధారణం కంటే ఎక్కువగా ఉండటాన్ని మధుమేహం లేదా షుగర్ అంటారు. తీపి పదార్థాలు తగ్గించి, తృణధాన్యాలు, ఆకుకూరలు తింటూ రోజూ నడవడం ద్వారా దీనిని చక్కగా నియంత్రించవచ్చు.`;
+    }
+    if (language === "hi-IN") {
+      return `डायबिटीज में खून में शुगर का स्तर बढ़ जाता है। चीनी व मीठे से परहेज करें, हरी सब्जियां खाएं और रोज व्यायाम करके इसे नियंत्रित रखा जा सकता है।`;
+    }
+    return `Diabetes occurs when blood glucose levels remain higher than normal. It can be effectively managed with a fiber-rich diet, limiting refined sugars, regular physical activity, and prescribed medication.`;
+  }
+
+  // 14. STOMACH ACHE / ACIDITY / DIGESTION
+  if (lower.includes("stomach") || lower.includes("acidity") || lower.includes("gas") || lower.includes("కడుపు") || lower.includes("ఎసిడిటీ") || lower.includes("पेट दर्द")) {
+    if (language === "te-IN") {
+      return `కడుపులో మంట లేదా గ్యాస్ ఉంటే గోరువెచ్చని నీరు తాగడం, తగినంత మజ్జిగ తీసుకోవడం మరియు మసాలా ఆహారాలకు దూరంగా ఉండటం మంచిది. నొప్పి తీవ్రంగా ఉంటే వెంటనే డాక్టర్‌ను సంప్రదించండి.`;
+    }
+    if (language === "hi-IN") {
+      return `पेट में गैस या दर्द के लिए गुनगुना पानी पिएं, छाछ लें और तला-भुना खाना न खाएं। यदि दर्द तेज या लगातार रहे तो डॉक्टर से संपर्क करें।`;
+    }
+    return `For mild stomach discomfort or acidity, drink warm water, try a glass of buttermilk, and avoid spicy or oily foods. If pain is severe or persistent, seek medical evaluation promptly.`;
+  }
+
+  // 15. COUGH / SORE THROAT
+  if (lower.includes("cough") || lower.includes("throat") || lower.includes("దగ్గు") || lower.includes("గొంతు") || lower.includes("खांसी") || lower.includes("गले")) {
+    if (language === "te-IN") {
+      return `దగ్గు మరియు గొంతునొప్పికి గోరువెచ్చని ఉప్పు నీటితో గార్గ్లింగ్ చేయడం, తులసి-అల్లం కషాయం లేదా తేనెతో గోరువెచ్చని నీరు తాగడం చాలా ఉపశమనం ఇస్తుంది.`;
+    }
+    if (language === "hi-IN") {
+      return `खांसी और गले की खराश के लिए हल्के गर्म नमक वाले पानी से गरारे करें और शहद या अदरक की चाय लें। इससे तुरंत आराम मिलता है।`;
+    }
+    return `For cough and throat irritation, gargling with warm salt water and sipping warm water with honey or ginger provides soothing relief. Rest and avoid chilled beverages.`;
+  }
+
+  // 16. DIET / NUTRITION / FOOD
+  if (lower.includes("diet") || lower.includes("food") || lower.includes("nutrition") || lower.includes("ఆహారం") || lower.includes("భోజనం") || lower.includes("आहार") || lower.includes("खाना")) {
+    if (language === "te-IN") {
+      return `ఆరోగ్యకరమైన ఆహారంలో పప్పుధాన్యాలు, తాజా ఆకుకూరలు, కూరగాయలు, మరియు పండ్లు ఉండేలా చూసుకోండి. నూనె మరియు ఉప్పును తగిన మోతాదులో మాత్రమే వాడండి.`;
+    }
+    if (language === "hi-IN") {
+      return `स्वस्थ आहार के लिए थाली में हरी सब्जियां, दालें, फल और साबुत अनाज शामिल करें। अधिक तेल और नमक से बचें।`;
+    }
+    return `A balanced diet should feature abundant fresh vegetables, whole grains, lentils or lean proteins, and fruits, while moderating processed foods, excess sodium, and refined sugars.`;
+  }
+
+  // 17. STRESS / ANXIETY
+  if (lower.includes("stress") || lower.includes("anxiety") || lower.includes("tension") || lower.includes("ఒత్తిడి") || lower.includes("టెన్షన్") || lower.includes("तनाव")) {
+    if (language === "te-IN") {
+      return `ఒత్తిడి తగ్గేందుకు 5 నిమిషాలు ప్రశాంతంగా కూర్చుని దీర్ఘ శ్వాస తీసుకోండి. కొద్దిసేపు ఆరుబయట నడవడం లేదా ఆత్మీయులతో మాట్లాడటం మంచి ఉపశమనం ఇస్తుంది.`;
+    }
+    if (language === "hi-IN") {
+      return `तनाव कम करने के लिए गहरी सांसें लें, थोड़ी देर टहलें और पसंदीदा काम में मन लगाएं। आवश्यकता पड़ने पर अपनों से बात करें।`;
+    }
+    return `To ease stress, practice slow, deep diaphragmatic breathing for 5 minutes, take a brisk walk outdoors, and stay connected with close friends or family.`;
+  }
+
+  // 18. GREETINGS & INTRODUCTIONS
+  if (lower.startsWith("hi") || lower.startsWith("hello") || lower.startsWith("hey") || lower.includes("నమస్కారం") || lower.includes("नमस्ते")) {
+    if (language === "te-IN") {
+      return `నమస్కారం! నేను మీకు ఎలా సహాయపడగలను? మీ ఆరోగ్యం గురించి లేదా ఏదైనా ప్రశ్న గురించి అడగండి.`;
+    }
+    if (language === "hi-IN") {
+      return `नमस्ते! मैं आपकी क्या सहायता कर सकता हूँ? आप मुझसे कोई भी सवाल पूछ सकते हैं।`;
+    }
+    return `Hello! How can I assist you today? Feel free to ask any question.`;
+  }
+
+  // 19. DIRECT ANSWER FOR GENERAL INQUIRIES (Avoid generic repetitive boilerplate)
   if (language === "te-IN") {
     return isDetailed
-      ? `మీ ప్రశ్నను అర్థం చేసుకున్నాను. మీ రోజువారీ శ్రేయస్సు కోసం సమతుల్య ఆహారం, రోజూ తేలికపాటి వ్యాయామం, మరియు తగినంత విశ్రాంతి తీసుకోవడం చాలా ముఖ్యం. మీరు అడిగిన అంశంపై ఇంకా ఏదైనా నిర్దిష్ట సమాచారం కావాలంటే అడగండి.`
-      : `నేను మీతో మాట్లాడటానికి సిద్ధంగా ఉన్నాను. మీరు అడిగిన విషయానికి సమాధానం అందించడానికి నేను ఇక్కడ ఉన్నాను. మీకు మరేదైనా సందేహం ఉంటే స్వేచ్ఛగా అడగండి.`;
+      ? `మీరు అడిగిన అంశంపై సమగ్ర సమాచారం: జీవనశైలిలో సమతుల్యత పాటించడం, తగినంత సమయం నిద్రపోవడం మరియు రోజువారీ వ్యాయామం చేయడం ద్వారా ఆరోగ్యాన్ని మెరుగుపరుచుకోవచ్చు.`
+      : `ఖచ్చితంగా! మీరు అడిగిన అంశంపై మరింత సమాచారం కావాలంటే నన్ను వివరంగా అడగండి.`;
   }
   if (language === "hi-IN") {
     return isDetailed
-      ? `आपके प्रश्न को समझा गया। स्वस्थ दिनचर्या के लिए संतुलित भोजन, नियमित व्यायाम और पर्याप्त नींद महत्वपूर्ण हैं। यदि आप इस बारे में और विस्तार से जानना चाहते हैं, तो बताएं।`
-      : `मैं आपकी बात समझ रहा हूँ। आप मुझसे किसी भी विषय पर बात कर सकते हैं। बताइए, आगे आप क्या जानना चाहते हैं?`;
+      ? `आपके प्रश्न पर विस्तृत मार्गदर्शन: संतुलित जीवनशैली, पर्याप्त नींद और दैनिक व्यायाम से स्वास्थ्य में सुधार होता है।`
+      : `जी बिल्कुल! इस बारे में यदि आप कुछ और जानना चाहते हैं, तो कृपया पूछें।`;
   }
   return isDetailed
-    ? `I understand your question. For balanced wellness and clarity, focus on healthy routines, consistent rest, and positive daily habits. Let me know if you would like me to elaborate further on any specific aspect.`
-    : `I'm here to assist you! Feel free to ask any question or chat casually about any topic.`;
+    ? `Regarding your query: Maintaining a balanced lifestyle, quality sleep, and consistent daily movement is foundational to lasting vitality.`
+    : `I am here to help answer your question directly. Let me know if you would like more details.`;
 }
 
 // AI Assistant endpoint
@@ -917,25 +1040,12 @@ app.post("/api/assistant/chat", async (req: Request, res: Response) => {
     const client = getGeminiClient();
     const { systemPrompt, isDetailed } = buildMediMitraSystemPrompt(userMessage, language, userContext);
 
-    // Prepare multi-turn conversation history for Gemini
+    // Prepare normalized multi-turn conversation history for Gemini
     const rawHistory = Array.isArray(messages) && messages.length > 0
       ? messages
       : [{ role: "user", content: userMessage }];
 
-    const geminiContents = rawHistory
-      .filter((m: any) => Boolean(m.content || m.text))
-      .map((m: any) => ({
-        role: (m.role === "assistant" || m.role === "model" || m.sender === "assistant") ? "model" : "user",
-        parts: [{ text: String(m.content || m.text).trim() }],
-      }));
-
-    // Ensure the last content element has role 'user'
-    if (geminiContents.length === 0 || geminiContents[geminiContents.length - 1].role !== "user") {
-      geminiContents.push({
-        role: "user",
-        parts: [{ text: userMessage }],
-      });
-    }
+    const geminiContents = normalizeGeminiContents(rawHistory, userMessage);
 
     if (client) {
       const candidateModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite"];

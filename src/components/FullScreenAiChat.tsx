@@ -668,20 +668,64 @@ export const FullScreenAiChat: React.FC = () => {
       }
     }
 
-    // 6. Default conversational response (Concise and natural, without canned disclaimers)
+    // 6. Diabetes / Sugar query
+    if (q.includes('sugar') || q.includes('diabetes') || q.includes('షుగర్') || q.includes('డయాబెటిస్') || q.includes('मधुमेह')) {
+      if (lang === 'te-IN') {
+        return 'రక్తంలో గ్లూకోజ్ స్థాయిలు పెరగడాన్ని మధుమేహం లేదా షుగర్ అంటారు. తీపి పదార్థాలు తగ్గించి, ఆకుకూరలు, తృణధాన్యాలు తింటూ రోజూ 30 నిమిషాలు వాకింగ్ చేయడం ద్వారా షుగర్‌ను అదుపులో ఉంచుకోవచ్చు.';
+      }
+      if (lang === 'hi-IN') {
+        return 'रक्त में शुगर का स्तर बढ़ना डायबिटीज कहलाता है। मीठे से परहेज, फाइबर युक्त भोजन और नियमित व्यायाम से इसे आसानी से नियंत्रित रखा जा सकता है।';
+      }
+      return 'Diabetes occurs when blood sugar levels remain higher than normal. It is managed with a high-fiber, low-refined-sugar diet, daily physical activity, and prescribed medication.';
+    }
+
+    // 7. Stomach Ache / Acidity
+    if (q.includes('stomach') || q.includes('acidity') || q.includes('gas') || q.includes('కడుపు') || q.includes('ఎసిడిటీ') || q.includes('पेट दर्द')) {
+      if (lang === 'te-IN') {
+        return 'కడుపులో మంట లేదా గ్యాస్ ఉంటే గోరువెచ్చని నీరు తాగండి, కాస్త మజ్జిగ తీసుకోండి మరియు నూనె, మసాలా ఆహారాలకు దూరంగా ఉండండి. నొప్పి తీవ్రంగా ఉంటే డాక్టర్‌ను సంప్రదించండి.';
+      }
+      if (lang === 'hi-IN') {
+        return 'पेट दर्द या एसिडिटी के लिए गुनगुना पानी पिएं, छाछ लें और तैलीय भोजन से बचें। अधिक दर्द में डॉक्टर की सलाह लें।';
+      }
+      return 'For mild stomach ache or acidity, sip warm water or buttermilk, and avoid spicy foods. If pain is severe or prolonged, seek medical advice.';
+    }
+
+    // 8. Cough / Cold
+    if (q.includes('cold') || q.includes('cough') || q.includes('జలుబు') || q.includes('దగ్గు') || q.includes('जुकाम') || q.includes('खांसी')) {
+      if (lang === 'te-IN') {
+        return 'స్వల్ప జలుబు, దగ్గుకు గోరువెచ్చని నీరు, ఆవిరి పట్టడం (స్టీమ్ ఇన్హేలేషన్) మరియు విశ్రాంతి మంచి ఉపశమనం ఇస్తాయి. తీవ్ర జ్వరం లేదా శ్వాస ఇబ్బంది ఉంటే డాక్టర్‌ను సంప్రదించండి.';
+      }
+      if (lang === 'hi-IN') {
+        return 'हल्के जुकाम में गर्म पानी पिएं, भाप लें और पर्याप्त आराम करें। यदि बुखार तेज हो तो डॉक्टर को दिखाएं।';
+      }
+      return 'For a mild cold, stay hydrated with warm fluids, take steam inhalation, and get plenty of rest. If high fever or breathing distress develops, consult a doctor.';
+    }
+
+    // 9. Greetings
+    if (q.startsWith('hi') || q.startsWith('hello') || q.startsWith('hey') || q.includes('నమస్కారం') || q.includes('नमस्ते')) {
+      if (lang === 'te-IN') {
+        return 'నమస్కారం! నేను మీకు ఎలా సహాయపడగలను? ఏదైనా ప్రశ్న ఉంటే స్వేచ్ఛగా అడగండి.';
+      }
+      if (lang === 'hi-IN') {
+        return 'नमस्ते! मैं आपकी क्या सहायता कर सकता हूँ? आप मुझसे कोई भी प्रश्न पूछ सकते हैं।';
+      }
+      return 'Hello! How can I assist you today? Feel free to ask any question.';
+    }
+
+    // 10. Default direct response
     if (lang === 'te-IN') {
       return isDetailed
-        ? 'మీరు అడిగిన విషయాన్ని అర్థం చేసుకున్నాను. సమతుల్య ఆహారం, రోజూ తేలికపాటి నడక, మరియు తగినంత విశ్రాంతి ఆరోగ్యాన్ని కాపాడతాయి. మీకు ఏదైనా నిర్దిష్ట విషయం లేదా లక్షణం గురించి వివరాలు కావాలంటే అడగండి.'
-        : 'నేను మీకు సహాయపడటానికి ఇక్కడ ఉన్నాను. మీరు సాధారణ విషయాలైనా లేదా ఆరోగ్యం గురించి ఏదైనా సందేహాలైనా స్వేచ్ఛగా అడగవచ్చు.';
+        ? 'మీరు అడిగిన అంశంపై సమగ్ర వివరణ: ఆరోగ్యకరమైన జీవనశైలి కోసం సమతుల్య ఆహారం, రోజూ తేలికపాటి వ్యాయామం మరియు తగినంత సమయం విశ్రాంతి తీసుకోవడం చాలా ముఖ్యం.'
+        : 'ఖచ్చితంగా! మీరు అడిగిన ప్రశ్నకు సహాయం చేయడానికి సిద్ధంగా ఉన్నాను. మరింత సమాచారం కావాలంటే అడగండి.';
     }
     if (lang === 'hi-IN') {
       return isDetailed
-        ? 'आपके प्रश्न को समझा गया। स्वस्थ रहने के लिए संतुलित आहार, नियमित सैर और पर्याप्त नींद सबसे महत्वपूर्ण हैं। यदि आप किसी खास विषय पर और जानना चाहते हैं, तो बताएं।'
-        : 'मैं आपकी सहायता के लिए तैयार हूँ। आप मुझसे किसी भी विषय पर बातचीत कर सकते हैं या स्वास्थ्य संबंधी सवाल पूछ सकते हैं।';
+        ? 'आपके प्रश्न पर विस्तृत जानकारी: स्वस्थ जीवनशैली के लिए संतुलित खानपान, नियमित व्यायाम और पर्याप्त नींद जरूरी है।'
+        : 'जी हाँ! मैं आपके सवाल का जवाब देने के लिए यहाँ हूँ। और जानकारी के लिए कृपया पूछें।';
     }
     return isDetailed
-      ? 'I understand your query. Maintaining balanced nutrition, daily brisk walking, regular hydration, and consistent rest are the pillars of long-term wellness. Let me know if you would like more details on any particular topic.'
-      : "I'm here to assist you! Feel free to chat casually or ask any questions regarding your daily health, wellness routines, or general topics.";
+      ? 'Regarding your query: Daily balance, wholesome nutrition, adequate hydration, and consistent rest are key elements to well-being.'
+      : 'I am here to help answer your question directly. Feel free to ask for any additional details.';
   };
 
   return (
@@ -808,9 +852,9 @@ export const FullScreenAiChat: React.FC = () => {
       {/* Main Visible Chat Messages Area */}
       <div
         id="fullscreen-chat-messages-box"
-        className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5"
+        className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 sm:space-y-5"
       >
-        <div className="max-w-3xl mx-auto space-y-4">
+        <div className="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-4">
           
           {/* Active Voice Speaking Banner */}
           {isSpeaking && (
@@ -1066,18 +1110,18 @@ export const FullScreenAiChat: React.FC = () => {
       </div>
 
       {/* Suggested Quick Prompts */}
-      <div className="bg-white/80 backdrop-blur-md border-t border-teal-100/80 px-4 py-2.5 shrink-0 overflow-x-auto">
-        <div className="max-w-3xl mx-auto flex items-center gap-2">
+      <div className="bg-white/80 backdrop-blur-md border-t border-teal-100/80 px-3 sm:px-4 py-2 sm:py-2.5 shrink-0 overflow-x-auto">
+        <div className="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-teal-600 shrink-0" />
           <span className="text-[11px] font-black text-teal-900 shrink-0">
             {language === 'te-IN' ? 'సూచనలు:' : 'Suggested:'}
           </span>
-          <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
+          <div className="flex items-center gap-2 overflow-x-auto pb-0.5 no-scrollbar">
             {quickPrompts[language]?.map((prompt, idx) => (
               <button
                 key={idx}
                 onClick={() => handleSendMessage(prompt, false)}
-                className="px-3.5 py-1 bg-white hover:bg-teal-50 border border-teal-200 hover:border-teal-400 rounded-full text-xs font-bold text-slate-700 hover:text-teal-900 whitespace-nowrap transition-all shadow-2xs cursor-pointer hover:scale-105 active:scale-95"
+                className="px-3 sm:px-3.5 py-1 bg-white hover:bg-teal-50 border border-teal-200 hover:border-teal-400 rounded-full text-xs font-bold text-slate-700 hover:text-teal-900 whitespace-nowrap transition-all shadow-2xs cursor-pointer hover:scale-105 active:scale-95"
               >
                 {prompt}
               </button>
@@ -1087,27 +1131,27 @@ export const FullScreenAiChat: React.FC = () => {
       </div>
 
       {/* Bottom Input Area */}
-      <div className="bg-white/90 backdrop-blur-xl border-t border-teal-100/90 p-3 sm:p-4 shrink-0 shadow-lg shadow-teal-950/5">
+      <div className="bg-white/90 backdrop-blur-xl border-t border-teal-100/90 p-2.5 sm:p-4 shrink-0 shadow-lg shadow-teal-950/5">
         <form
           onSubmit={(e) => {
             e.preventDefault();
             handleSendMessage(inputText, false);
           }}
-          className="max-w-3xl mx-auto flex items-center gap-2 sm:gap-3"
+          className="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-2 sm:gap-3"
         >
           {/* Large Accessible Microphone Button with Voice Pulse */}
           <button
             type="button"
             id="btn-chat-mic-toggle"
             onClick={handleToggleVoice}
-            className={`w-13 h-13 rounded-2xl flex items-center justify-center transition-all shadow-md shrink-0 cursor-pointer ${
+            className={`w-11 h-11 sm:w-13 sm:h-13 rounded-2xl flex items-center justify-center transition-all shadow-md shrink-0 cursor-pointer ${
               isListening
                 ? 'bg-rose-600 text-white animate-pulse scale-105 shadow-rose-600/40 ring-4 ring-rose-300'
                 : 'bg-gradient-to-r from-teal-600 to-cyan-700 hover:from-teal-700 hover:to-cyan-800 text-white shadow-teal-600/30 active:scale-95'
             }`}
             title={isListening ? 'Click to stop listening' : 'Click to speak'}
           >
-            {isListening ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+            {isListening ? <MicOff className="w-5 h-5 sm:w-6 sm:h-6" /> : <Mic className="w-5 h-5 sm:w-6 sm:h-6" />}
           </button>
 
           {/* Text Input Field */}
@@ -1118,7 +1162,7 @@ export const FullScreenAiChat: React.FC = () => {
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               placeholder={isListening ? t.listeningWave : t.typeOrSpeakMessage}
-              className="w-full px-4 py-3.5 bg-slate-50 border border-teal-100 rounded-2xl text-sm sm:text-base focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-slate-900 transition-all font-semibold shadow-inner"
+              className="w-full px-3.5 sm:px-4 py-2.5 sm:py-3.5 bg-slate-50 border border-teal-100 rounded-2xl text-xs sm:text-base focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-slate-900 transition-all font-semibold shadow-inner"
             />
           </div>
 
@@ -1127,14 +1171,14 @@ export const FullScreenAiChat: React.FC = () => {
             type="submit"
             id="btn-chat-send"
             disabled={!inputText.trim() || isThinking}
-            className={`w-13 h-13 rounded-2xl flex items-center justify-center transition-all shadow-xs shrink-0 cursor-pointer ${
+            className={`w-11 h-11 sm:w-13 sm:h-13 rounded-2xl flex items-center justify-center transition-all shadow-xs shrink-0 cursor-pointer ${
               inputText.trim() && !isThinking
                 ? 'bg-gradient-to-r from-teal-600 to-cyan-700 hover:from-teal-700 hover:to-cyan-800 text-white shadow-teal-600/25 active:scale-95'
                 : 'bg-slate-100 text-slate-300 cursor-not-allowed'
             }`}
             title="Send message"
           >
-            <Send className="w-5 h-5" />
+            <Send className="w-4 h-4 sm:w-5 sm:h-5" />
           </button>
         </form>
       </div>

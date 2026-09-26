@@ -179,12 +179,12 @@ export const MedicineManagerPage: React.FC = () => {
   const adherenceRate = activeMeds.length > 0 ? Math.round((totalTakenToday / activeMeds.length) * 100) : 100;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6 sm:space-y-8">
+    <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 space-y-5 sm:space-y-8">
       
       {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white rounded-3xl p-6 sm:p-8 border border-blue-100 shadow-xs">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white rounded-3xl p-5 sm:p-8 border border-blue-100 shadow-xs">
         <div>
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
             <span className="p-1 rounded-md bg-blue-100 text-blue-800">
               <Pill className="w-4 h-4" />
             </span>
@@ -200,11 +200,11 @@ export const MedicineManagerPage: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 w-full lg:w-auto">
           <button
             id="btn-test-alarm"
             onClick={testMedicineAlarmAudio}
-            className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs sm:text-sm transition-colors border border-indigo-200"
+            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-4 py-2.5 sm:py-3 rounded-2xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs sm:text-sm transition-colors border border-indigo-200 cursor-pointer"
             title="Test audible chime and phone vibration"
           >
             <Play className="w-4 h-4 text-indigo-600" />
@@ -214,7 +214,7 @@ export const MedicineManagerPage: React.FC = () => {
           <button
             id="btn-open-add-med"
             onClick={() => setIsAddModalOpen(true)}
-            className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs sm:text-sm shadow-md shadow-blue-600/20 transition-all"
+            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-5 py-2.5 sm:py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs sm:text-sm shadow-md shadow-blue-600/20 transition-all cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>{t.addMedicine}</span>

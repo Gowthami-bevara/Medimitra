@@ -183,25 +183,25 @@ export const HomePage: React.FC = () => {
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 space-y-5 sm:space-y-6">
       
       {/* 1. Header Greeting Banner with Prominent MedMitra Identity */}
-      <div className="bg-white/92 backdrop-blur-xl rounded-3xl p-6 sm:p-8 border border-teal-100/90 shadow-xl shadow-teal-950/5 flex flex-col md:flex-row md:items-center justify-between gap-5 transition-all hover:shadow-2xl hover:shadow-teal-950/10">
-        <div className="flex items-start sm:items-center gap-4 sm:gap-5">
-          <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-3xl bg-gradient-to-tr from-teal-600 via-cyan-600 to-teal-700 text-white flex items-center justify-center shadow-lg shadow-teal-700/25 shrink-0">
-            <HeartPulse className="w-8 h-8 sm:w-9 sm:h-9" />
+      <div className="bg-white/92 backdrop-blur-xl rounded-3xl p-5 sm:p-8 border border-teal-100/90 shadow-xl shadow-teal-950/5 flex flex-col md:flex-row md:items-center justify-between gap-4 sm:gap-5 transition-all hover:shadow-2xl hover:shadow-teal-950/10">
+        <div className="flex items-start sm:items-center gap-3.5 sm:gap-5">
+          <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-2xl sm:rounded-3xl bg-gradient-to-tr from-teal-600 via-cyan-600 to-teal-700 text-white flex items-center justify-center shadow-lg shadow-teal-700/25 shrink-0">
+            <HeartPulse className="w-7 h-7 sm:w-9 sm:h-9" />
           </div>
           <div>
-            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-              <span className="font-display font-black text-sm text-teal-900 tracking-wider flex items-center gap-1.5 uppercase">
+            <div className="flex items-center gap-1.5 sm:gap-2 mb-1.5 flex-wrap">
+              <span className="font-display font-black text-xs sm:text-sm text-teal-900 tracking-wider flex items-center gap-1.5 uppercase">
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse inline-block"></span>
                 Medi<span className="text-teal-600">Mitra</span> • {language === 'te-IN' ? 'AI ఆరోగ్య వేదిక' : language === 'hi-IN' ? 'AI स्वास्थ्य साथी' : 'AI Healthcare Suite'}
               </span>
-              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-teal-50 text-teal-800 border border-teal-200">
+              <span className="px-2 sm:px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-teal-50 text-teal-800 border border-teal-200">
                 {language === 'te-IN' ? 'సురక్షిత ప్రొఫైల్' : 'Verified Session'}
               </span>
             </div>
-            <h1 className="font-display font-black text-2xl sm:text-3xl lg:text-4xl text-slate-900 tracking-tight">
+            <h1 className="font-display font-black text-xl sm:text-3xl lg:text-4xl text-slate-900 tracking-tight">
               {personalizedGreeting}
             </h1>
             <p className="mt-1 text-slate-600 text-xs sm:text-sm font-semibold">
@@ -214,7 +214,7 @@ export const HomePage: React.FC = () => {
         <button
           id="btn-view-full-health-metrics"
           onClick={() => setActiveTab('my-health')}
-          className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-teal-50 hover:bg-teal-100/90 text-teal-950 text-xs font-black border border-teal-200/90 transition-all shadow-2xs self-start md:self-auto cursor-pointer hover:scale-105 active:scale-95 shrink-0"
+          className="inline-flex items-center justify-center gap-2 px-4 sm:px-5 py-2.5 sm:py-3 rounded-2xl bg-teal-50 hover:bg-teal-100/90 text-teal-950 text-xs font-black border border-teal-200/90 transition-all shadow-2xs w-full sm:w-auto cursor-pointer hover:scale-102 active:scale-98 shrink-0"
         >
           <Lock className="w-4 h-4 text-teal-600" />
           <span>{t.viewFullMetrics}</span>
@@ -225,20 +225,20 @@ export const HomePage: React.FC = () => {
       {/* 2. CARD 1: AI Health Assistant Hero Card with Modern Icons & Quick Chips */}
       <div
         id="hero-talk-banner"
-        className="relative overflow-hidden bg-gradient-to-br from-teal-700 via-cyan-800 to-blue-900 text-white rounded-3xl p-6 sm:p-8 shadow-xl shadow-teal-950/10"
+        className="relative overflow-hidden bg-gradient-to-br from-teal-700 via-cyan-800 to-blue-900 text-white rounded-3xl p-5 sm:p-8 shadow-xl shadow-teal-950/10"
       >
         {/* Glowing radial backdrop */}
         <div className="absolute -top-20 -right-20 w-72 h-72 bg-emerald-400/20 rounded-full blur-3xl pointer-events-none"></div>
         <div className="absolute -bottom-20 -left-20 w-72 h-72 bg-cyan-400/20 rounded-full blur-3xl pointer-events-none"></div>
 
-        <div className="relative z-10 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
-          <div className="flex items-start sm:items-center gap-5">
+        <div className="relative z-10 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-5 sm:gap-6">
+          <div className="flex items-start sm:items-center gap-3.5 sm:gap-5">
             <div
               onClick={() => setIsVoiceAssistantOpen(true)}
-              className="w-16 h-16 sm:w-20 sm:h-20 rounded-3xl bg-white text-teal-700 flex items-center justify-center shadow-xl shadow-black/20 hover:scale-105 active:scale-95 transition-all cursor-pointer shrink-0 group"
+              className="w-14 h-14 sm:w-20 sm:h-20 rounded-2xl sm:rounded-3xl bg-white text-teal-700 flex items-center justify-center shadow-xl shadow-black/20 hover:scale-105 active:scale-95 transition-all cursor-pointer shrink-0 group"
               title="Click to talk"
             >
-              <Mic className="w-8 h-8 sm:w-10 sm:h-10 text-teal-600 group-hover:scale-110 transition-transform animate-pulse" />
+              <Mic className="w-7 h-7 sm:w-10 sm:h-10 text-teal-600 group-hover:scale-110 transition-transform animate-pulse" />
             </div>
 
             <div>
@@ -246,7 +246,7 @@ export const HomePage: React.FC = () => {
                 <Sparkles className="w-3.5 h-3.5 text-emerald-300" />
                 <span>AI Health Assistant</span>
               </div>
-              <h2 className="font-display font-black text-2xl sm:text-3xl text-white tracking-tight">
+              <h2 className="font-display font-black text-xl sm:text-3xl text-white tracking-tight">
                 {t.tapToTalkMediMitra}
               </h2>
               <p className="text-teal-100 text-xs sm:text-sm mt-1 max-w-xl font-medium">
@@ -263,7 +263,7 @@ export const HomePage: React.FC = () => {
           <button
             id="hero-talk-cta-btn"
             onClick={() => setIsVoiceAssistantOpen(true)}
-            className="flex items-center gap-2.5 px-6 py-3.5 rounded-2xl bg-white text-teal-950 font-black text-sm shadow-xl shadow-black/15 hover:bg-teal-50 transition-all whitespace-nowrap cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+            className="w-full lg:w-auto flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-2xl bg-white text-teal-950 font-black text-sm shadow-xl shadow-black/15 hover:bg-teal-50 transition-all whitespace-nowrap cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
           >
             <Mic className="w-4.5 h-4.5 text-teal-600" />
             <span>{t.talkToMediMitra}</span>
@@ -335,7 +335,7 @@ export const HomePage: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-end sm:self-auto">
+          <div className="flex items-center gap-2 w-full sm:w-auto justify-end sm:justify-start flex-wrap">
             <button
               type="button"
               id="gps-refresh-btn"
@@ -729,7 +729,7 @@ export const HomePage: React.FC = () => {
             </a>
 
             {/* Quick Action Matrix: Doctor Call, Emergency Contact, Traffic Corridor */}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3">
               <a
                 href={`tel:${primaryEmergencyContact?.phone || '108'}`}
                 className="p-3 rounded-2xl bg-white/15 hover:bg-white/25 border border-white/20 text-white text-xs font-black flex items-center gap-2 transition-all"

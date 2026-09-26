@@ -41,9 +41,9 @@ export const NearbyHospitalPage: React.FC = () => {
   });
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 space-y-5 sm:space-y-6">
       {/* Header Banner */}
-      <div className="bg-white/92 backdrop-blur-xl rounded-3xl p-6 sm:p-8 border border-teal-100/90 shadow-xl shadow-teal-950/5 flex flex-col md:flex-row md:items-center justify-between gap-5">
+      <div className="bg-white/92 backdrop-blur-xl rounded-3xl p-5 sm:p-8 border border-teal-100/90 shadow-xl shadow-teal-950/5 flex flex-col md:flex-row md:items-center justify-between gap-4 sm:gap-5">
         <div>
           <div className="flex items-center gap-2 mb-2">
             <div className="w-8 h-8 rounded-xl bg-teal-600 text-white flex items-center justify-center shadow-xs">

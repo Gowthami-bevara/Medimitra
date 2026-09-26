@@ -81,12 +81,12 @@ export const DoctorFinderPage: React.FC = () => {
   });
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6 sm:space-y-8">
+    <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 space-y-5 sm:space-y-8">
       
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white rounded-3xl p-6 sm:p-8 border border-blue-100 shadow-xs">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white rounded-3xl p-5 sm:p-8 border border-blue-100 shadow-xs">
         <div>
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
             <span className="p-1 rounded-md bg-blue-100 text-blue-800">
               <Stethoscope className="w-4 h-4" />
             </span>
@@ -103,28 +103,28 @@ export const DoctorFinderPage: React.FC = () => {
         </div>
 
         {/* Action Buttons: Calibrate GPS & Refresh Button */}
-        <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 w-full lg:w-auto">
           <button
             id="btn-request-doctor-location"
             onClick={handleRequestLocation}
-            className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl text-xs sm:text-sm font-bold border transition-colors ${
+            className={`flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl text-xs sm:text-sm font-bold border transition-colors cursor-pointer ${
               userLocation.isGpsDetected
                 ? 'bg-blue-50 border-blue-300 text-blue-800 hover:bg-blue-100'
                 : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
             }`}
           >
             <LocateFixed className={`w-4 h-4 ${userLocation.isGpsDetected ? 'text-blue-600' : 'text-slate-500'}`} />
-            <span>{userLocation.isGpsDetected ? 'Recalibrate GPS' : 'Request Location Permission'}</span>
+            <span>{userLocation.isGpsDetected ? 'Recalibrate GPS' : 'Request Location'}</span>
           </button>
 
           <button
             id="btn-refresh-nearby-doctors"
             onClick={() => refreshNearbyDoctors()}
             disabled={nearbyDoctorsLoading}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs sm:text-sm font-bold shadow-xs transition-colors"
+            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs sm:text-sm font-bold shadow-xs transition-colors cursor-pointer"
           >
             <RefreshCw className={`w-4 h-4 ${nearbyDoctorsLoading ? 'animate-spin' : ''}`} />
-            <span>{nearbyDoctorsLoading ? 'Searching...' : 'Refresh Nearby Doctors'}</span>
+            <span>{nearbyDoctorsLoading ? 'Searching...' : 'Refresh Doctors'}</span>
           </button>
         </div>
       </div>
