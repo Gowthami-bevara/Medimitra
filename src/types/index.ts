@@ -171,6 +171,10 @@ export interface Hospital {
   traumaLevel: string;
   lat?: number;
   lng?: number;
+  directionsUrl?: string;
+  source?: string;
+  rating?: number | null;
+  ratingCount?: number;
 }
 
 export interface TrafficJunction {

@@ -51,6 +51,14 @@ interface AppContextType {
   } | null;
   nearbyDoctorsProvider: 'google' | 'osm';
   hospitals: Hospital[];
+  nearbyHospitalsLoading: boolean;
+  nearbyHospitalsError: string | null;
+  nearbyHospitalsConfigRequired: {
+    apiRequired: string;
+    envVariable: string;
+    message: string;
+    userCoordinates?: { lat: number; lng: number };
+  } | null;
   prediction: HealthPredictionResult;
   language: AppLanguage;
   easyMode: boolean;
@@ -75,6 +83,8 @@ interface AppContextType {
   setNearbyDoctorsProvider: (provider: 'google' | 'osm') => void;
   fetchNearbyDoctors: (lat?: number, lng?: number, provider?: 'google' | 'osm', force?: boolean) => Promise<void>;
   refreshNearbyDoctors: () => Promise<void>;
+  fetchNearbyHospitals: (lat?: number | null, lng?: number | null, force?: boolean) => Promise<void>;
+  refreshNearbyHospitals: () => Promise<void>;
   login: (email: string, name?: string) => void;
   register: (email: string, name: string) => void;
   registerWithPhone: (phone: string) => void;
@@ -224,12 +234,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   } | null>(null);
   const [nearbyDoctorsProvider, setNearbyDoctorsProvider] = useState<'google' | 'osm'>('google');
 
-  const [hospitals, setHospitals] = useState<Hospital[]>(() =>
-    getNearbyHospitalsWithLiveDistance(SEED_HOSPITALS, userLocation)
-  );
+  // Real Hospital state queried from Google Places API
+  const [hospitals, setHospitals] = useState<Hospital[]>([]);
+  const [nearbyHospitalsLoading, setNearbyHospitalsLoading] = useState<boolean>(false);
+  const [nearbyHospitalsError, setNearbyHospitalsError] = useState<string | null>(null);
+  const [nearbyHospitalsConfigRequired, setNearbyHospitalsConfigRequired] = useState<{
+    apiRequired: string;
+    envVariable: string;
+    message: string;
+    userCoordinates?: { lat: number; lng: number };
+  } | null>(null);
 
   const lastSearchedCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastSearchedProviderRef = useRef<'google' | 'osm'>('google');
+  const lastSearchedHospitalCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const fetchNearbyDoctors = async (
     targetLat?: number | null,
@@ -309,6 +327,76 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const fetchNearbyHospitals = async (
+    targetLat?: number | null,
+    targetLng?: number | null,
+    force = false
+  ) => {
+    const lat = targetLat ?? userLocation.lat;
+    const lng = targetLng ?? userLocation.lng;
+
+    if (lat == null || lng == null || typeof lat !== 'number' || typeof lng !== 'number' || isNaN(lat) || isNaN(lng)) {
+      return;
+    }
+
+    if (!force && lastSearchedHospitalCoordsRef.current) {
+      const dist = calculateDistanceKm(lastSearchedHospitalCoordsRef.current.lat, lastSearchedHospitalCoordsRef.current.lng, lat, lng);
+      if (dist < 0.3) {
+        return;
+      }
+    }
+
+    setNearbyHospitalsLoading(true);
+    setNearbyHospitalsError(null);
+
+    try {
+      const params = new URLSearchParams({
+        lat: lat.toString(),
+        lng: lng.toString(),
+        radius: '10000',
+      });
+
+      const res = await fetch(getApiUrl(`/api/places/nearby-hospitals?${params.toString()}`));
+      const data = await res.json();
+
+      if (data.success && Array.isArray(data.data)) {
+        setHospitals(data.data);
+        setNearbyHospitalsConfigRequired(null);
+        lastSearchedHospitalCoordsRef.current = { lat, lng };
+      } else if (data.error === 'API_KEY_REQUIRED') {
+        // STRICT REQUIREMENT: If Google API key is missing, do NOT display fake hospitals!
+        setHospitals([]);
+        setNearbyHospitalsConfigRequired({
+          apiRequired: data.apiRequired || 'Google Places API (New) / Google Maps Platform',
+          envVariable: data.envVariable || 'GOOGLE_MAPS_API_KEY',
+          message: data.message || 'Google Places API key is required to query live verified emergency hospitals.',
+          userCoordinates: data.userCoordinates || { lat, lng },
+        });
+        lastSearchedHospitalCoordsRef.current = { lat, lng };
+      } else {
+        setHospitals([]);
+        setNearbyHospitalsError(data.message || data.error || 'Failed to retrieve nearby emergency hospitals.');
+      }
+    } catch (err: any) {
+      console.error('Error fetching nearby hospitals:', err);
+      setHospitals([]);
+      setNearbyHospitalsError('Network error connecting to nearby hospitals API.');
+    } finally {
+      setNearbyHospitalsLoading(false);
+    }
+  };
+
+  const refreshNearbyHospitals = async () => {
+    if (userLocation.lat != null && userLocation.lng != null) {
+      await fetchNearbyHospitals(userLocation.lat, userLocation.lng, true);
+    } else {
+      const freshLoc = await detectUserLocation();
+      if (freshLoc.lat != null && freshLoc.lng != null) {
+        await fetchNearbyHospitals(freshLoc.lat, freshLoc.lng, true);
+      }
+    }
+  };
+
   // Re-fetch when user GPS coordinates change significantly (>= 300m) or on first coordinate fix
   useEffect(() => {
     if (userLocation.lat != null && userLocation.lng != null && userLocation.isGpsDetected) {
@@ -320,8 +408,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           fetchNearbyDoctors(userLocation.lat, userLocation.lng, nearbyDoctorsProvider);
         }
       }
+
+      if (!lastSearchedHospitalCoordsRef.current) {
+        fetchNearbyHospitals(userLocation.lat, userLocation.lng);
+      } else {
+        const distH = calculateDistanceKm(lastSearchedHospitalCoordsRef.current.lat, lastSearchedHospitalCoordsRef.current.lng, userLocation.lat, userLocation.lng);
+        if (distH >= 0.3) {
+          fetchNearbyHospitals(userLocation.lat, userLocation.lng);
+        }
+      }
     }
-    setHospitals(getNearbyHospitalsWithLiveDistance(SEED_HOSPITALS, userLocation));
   }, [userLocation.lat, userLocation.lng, userLocation.isGpsDetected]);
 
   const watchIdRef = useRef<number | null>(null);
@@ -1233,6 +1329,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         fetchNearbyDoctors,
         refreshNearbyDoctors,
         hospitals,
+        nearbyHospitalsLoading,
+        nearbyHospitalsError,
+        nearbyHospitalsConfigRequired,
+        fetchNearbyHospitals,
+        refreshNearbyHospitals,
         prediction,
         language,
         easyMode,

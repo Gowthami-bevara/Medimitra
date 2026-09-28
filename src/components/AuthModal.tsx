@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { HeartPulse, Phone, KeyRound, ArrowRight, ShieldCheck, RefreshCw, Edit3, Globe, Sparkles, AlertCircle, CheckCircle2, Clock } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { TRANSLATIONS } from '../utils/i18n';
-import { getApiUrl } from '../utils/api';
+import { getApiUrl, checkApiHealth, isRemotePreviewWithLocalhostConfigured } from '../utils/api';
 
 interface AuthModalProps {
   onSuccess?: () => void;
@@ -29,6 +29,24 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
     }, 1000);
     return () => clearInterval(interval);
   }, [cooldown]);
+
+  // API health check on component mount to verify frontend-to-backend connection
+  useEffect(() => {
+    checkApiHealth().then((res) => {
+      if (res.connected) {
+        console.log(`[MedMitra API] Connected to backend at ${res.url}:`, res.message);
+      } else {
+        console.warn(`[MedMitra API] Health check status at ${res.url}:`, res.error);
+      }
+    });
+  }, []);
+
+  const getCleanErrorMessage = (apiUrl: string, defaultMessage?: string) => {
+    if (isRemotePreviewWithLocalhostConfigured()) {
+      return `Remote Preview Limitation: The frontend is running on a remote preview (${window.location.origin}), which cannot directly connect to http://localhost:5000 on your private computer. Please run the frontend locally (http://localhost:5173) or configure a public HTTPS backend URL in VITE_API_BASE_URL.`;
+    }
+    return defaultMessage || `Unable to connect to MedMitra authentication API at ${apiUrl}. Please ensure the backend is running and CORS is configured.`;
+  };
 
   const handleSendOtp = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -57,67 +75,54 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
-        body: JSON.stringify({ phone: cleaned }),
+        credentials: 'include',
+        body: JSON.stringify({ phone: `+91${cleaned}` }),
       });
 
-      const contentType = res.headers.get('content-type') || '';
-      let data: any;
-
-      if (contentType.includes('application/json')) {
-        try {
-          data = await res.json();
-        } catch {
-          data = { message: `Unable to parse server JSON response (HTTP ${res.status}).` };
-        }
-      } else {
-        const text = await res.text().catch(() => '');
-        data = {
-          message: `Backend returned non-JSON response (HTTP ${res.status} ${res.statusText || ''}). Make sure API server is running on port 5000.`,
-          details: text.slice(0, 200),
-        };
+      // Safely parse JSON response from server
+      let data: any = null;
+      const rawText = await res.text().catch(() => '');
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = null;
       }
 
-      if (!res.ok || !data.success) {
-        // Always display the REAL backend error message
-        const realError =
-          data.message ||
-          (data.error ? `Error: ${data.error}` : null) ||
-          `Failed to request OTP (HTTP ${res.status}).`;
-        setError(realError);
+      // If server returned non-JSON HTML/text, display a clean connection error
+      if (!data || typeof data !== 'object') {
+        setError(getCleanErrorMessage(apiUrl));
         return;
       }
 
-      // Success: mask phone and switch to OTP step
+      // If backend returned failure (success: false)
+      if (data.success === false || (!res.ok && data.success !== true)) {
+        setError(data.message || (data.error ? `Error: ${data.error}` : `Failed to request OTP (HTTP ${res.status}).`));
+        return;
+      }
+
+      // Backend returned success: true (HTTP 200)
       setMaskedPhone(data.maskedPhone || `******${cleaned.slice(-4)}`);
       setStep('otp');
       setCooldown(30); // 30-second cooldown
       setOtp('');
       setInfoMessage(
-        language === 'te-IN'
-          ? `ఓటీపీ మీ మొబైల్ నంబర్ (${data.maskedPhone}) కు పంపబడింది. దయచేసి నమోదు చేయండి.`
+        data.message ||
+        (language === 'te-IN'
+          ? `ఓటీపీ మీ మొబైల్ నంబర్ (${data.maskedPhone || cleaned}) కు పంపబడింది. దయచేసి నమోదు చేయండి.`
           : language === 'hi-IN'
-          ? `ओटीपी आपके मोबाइल नंबर (${data.maskedPhone}) पर भेजा गया है।`
-          : `Verification code sent to ${data.maskedPhone}. Please enter the 6-digit code.`
+          ? `ओटीपी आपके मोबाइल नंबर (${data.maskedPhone || cleaned}) पर भेजा गया है।`
+          : `Verification code sent to ${data.maskedPhone || cleaned}. Please enter the 6-digit code.`)
       );
     } catch (err: any) {
       console.error('Error sending OTP to', apiUrl, err);
-      const isConnectionIssue =
-        err?.message?.includes('Failed to fetch') ||
-        err?.name === 'TypeError' ||
-        err?.message?.includes('NetworkError');
-
-      const realMessage = isConnectionIssue
-        ? `Cannot connect to backend service at ${apiUrl}. Please verify the Express server is running (e.g. http://localhost:5000) and CORS is enabled for ${window.location.origin}.`
-        : (err?.message || 'Network error communicating with authentication service.');
-
-      setError(realMessage);
+      setError(getCleanErrorMessage(apiUrl));
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleVerifyOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
     setError(null);
     setInfoMessage(null);
 
@@ -143,49 +148,43 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
+        credentials: 'include',
         body: JSON.stringify({
-          phone: phone.replace(/\D/g, ''),
+          phone: `+91${phone.replace(/\D/g, '').slice(-10)}`,
           otp: cleanedOtp,
         }),
       });
 
-      const contentType = res.headers.get('content-type') || '';
-      let data: any;
-
-      if (contentType.includes('application/json')) {
-        try {
-          data = await res.json();
-        } catch {
-          data = { message: `Unable to parse server JSON response (HTTP ${res.status}).` };
-        }
-      } else {
-        const text = await res.text().catch(() => '');
-        data = {
-          message: `Backend returned non-JSON response (HTTP ${res.status}).`,
-          details: text.slice(0, 200),
-        };
+      // Safely parse JSON response from server
+      let data: any = null;
+      const rawText = await res.text().catch(() => '');
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = null;
       }
 
-      if (!res.ok || !data.success) {
+      // If server returned non-JSON HTML/text, display clean connection error
+      if (!data || typeof data !== 'object') {
+        setError(getCleanErrorMessage(apiUrl));
+        return;
+      }
+
+      // If backend returned failure (success: false)
+      if (data.success === false || (!res.ok && data.success !== true)) {
         setError(data.message || (data.error ? `Error: ${data.error}` : 'Incorrect or expired OTP.'));
         return;
       }
 
-      // OTP verified successfully
-      registerWithPhone(`+91 ${phone.replace(/\D/g, '')}`);
+      // OTP verified successfully (HTTP 200)
+      if (data.message) {
+        setInfoMessage(data.message);
+      }
+      registerWithPhone(`+91 ${phone.replace(/\D/g, '').slice(-10)}`);
       if (onSuccess) onSuccess();
     } catch (err: any) {
       console.error('Error verifying OTP at', apiUrl, err);
-      const isConnectionIssue =
-        err?.message?.includes('Failed to fetch') ||
-        err?.name === 'TypeError' ||
-        err?.message?.includes('NetworkError');
-
-      const realMessage = isConnectionIssue
-        ? `Cannot connect to backend service at ${apiUrl}. Please verify the Express server is running and CORS is enabled.`
-        : (err?.message || 'Verification communication failed. Please try again.');
-
-      setError(realMessage);
+      setError(getCleanErrorMessage(apiUrl));
     } finally {
       setIsLoading(false);
     }

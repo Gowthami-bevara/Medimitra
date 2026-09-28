@@ -16,10 +16,14 @@ import {
   Bell,
   Play,
   Sparkles,
+  Search,
+  Database,
+  BookOpen,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { TRANSLATIONS } from '../utils/i18n';
 import { MedicineItem } from '../types';
+import { getApiUrl } from '../utils/api';
 
 interface CommonMedicine {
   name: string;
@@ -62,6 +66,36 @@ export const MedicineManagerPage: React.FC = () => {
 
   // Filtering state
   const [filterTab, setFilterTab] = useState<'all' | 'active' | 'completed'>('all');
+
+  // Kaggle Medical Dataset Search State
+  const [kaggleQuery, setKaggleQuery] = useState('');
+  const [kaggleLoading, setKaggleLoading] = useState(false);
+  const [kaggleResult, setKaggleResult] = useState<any | null>(null);
+
+  const handleKaggleSearch = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const queryToSearch = kaggleQuery.trim();
+    if (!queryToSearch) return;
+
+    setKaggleLoading(true);
+    try {
+      const res = await fetch(getApiUrl('/api/medicines/lookup'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: queryToSearch, language }),
+      });
+      const data = await res.json();
+      setKaggleResult(data);
+    } catch (err) {
+      console.error('Kaggle lookup error:', err);
+      setKaggleResult({
+        found: false,
+        summaryText: 'Network error connecting to medicine dataset service.',
+      });
+    } finally {
+      setKaggleLoading(false);
+    }
+  };
 
   // Add Medicine Modal State
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -300,6 +334,63 @@ export const MedicineManagerPage: React.FC = () => {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Kaggle Medicine Dataset Information Card */}
+      <div className="bg-white rounded-3xl border border-blue-100 p-5 sm:p-6 shadow-xs space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-teal-50 text-teal-700 flex items-center justify-center">
+              <Database className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="font-display font-bold text-sm sm:text-base text-blue-950">
+                  Medicine Information Lookup (Kaggle Medical Dataset)
+                </h2>
+                <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-teal-50 text-teal-800 border border-teal-200">
+                  shubhambathwal/medicine-dataset
+                </span>
+              </div>
+              <p className="text-xs text-slate-500">
+                Search verified medicine indications, uses, and basic pharmacological data. Purely educational — no prescribing or dosage advice.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <form onSubmit={handleKaggleSearch} className="flex flex-col sm:flex-row items-center gap-2">
+          <div className="relative flex-1 w-full">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={kaggleQuery}
+              onChange={(e) => setKaggleQuery(e.target.value)}
+              placeholder="e.g., What is Dolo 650 used for? / Pantoprazole / Metformin..."
+              className="w-full pl-10 pr-4 py-2.5 text-xs sm:text-sm font-semibold bg-slate-50 border border-slate-200 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-teal-500 text-slate-800"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={kaggleLoading || !kaggleQuery.trim()}
+            className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs sm:text-sm shadow-xs transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
+          >
+            <BookOpen className="w-4 h-4" />
+            <span>{kaggleLoading ? 'Searching...' : 'Search Dataset'}</span>
+          </button>
+        </form>
+
+        {kaggleResult && (
+          <div className={`p-4 rounded-2xl border text-xs sm:text-sm transition-all ${
+            kaggleResult.found
+              ? 'bg-teal-50/60 border-teal-200 text-teal-950'
+              : 'bg-slate-50 border-slate-200 text-slate-700'
+          }`}>
+            <pre className="font-sans whitespace-pre-wrap leading-relaxed">
+              {kaggleResult.summaryText}
+            </pre>
+          </div>
+        )}
       </div>
 
       {/* Adherence Overview Bar */}

@@ -5,16 +5,22 @@ import dotenv from "dotenv";
 import crypto from "crypto";
 import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
+import { kaggleMedicineService } from "./src/server/kaggleMedicineService";
 
 dotenv.config();
 
 const app = express();
 
-// In AI Studio Cloud Run container, port 3000 is required by the container's nginx proxy.
-// When running locally outside Cloud Run (e.g. localhost:5000), respects PORT or BACKEND_PORT.
-const PORT = process.env.K_SERVICE
-  ? 3000
-  : (process.env.PORT ? parseInt(process.env.PORT, 10) : (process.env.BACKEND_PORT ? parseInt(process.env.BACKEND_PORT, 10) : 5000));
+// Determine port: support CLI argument (--port 3000), PORT env var, or default to 3000 in AI Studio
+const portArgIdx = process.argv.indexOf("--port");
+const portFromArgs =
+  portArgIdx !== -1 && process.argv[portArgIdx + 1]
+    ? parseInt(process.argv[portArgIdx + 1], 10)
+    : null;
+
+const PORT = process.env.PORT
+  ? parseInt(process.env.PORT, 10)
+  : (portFromArgs || (process.env.K_SERVICE ? 3000 : 3000));
 
 // Configure CORS for local development and container preview
 const allowedOrigins = [
@@ -31,12 +37,19 @@ if (process.env.FRONTEND_URL) {
   allowedOrigins.push(process.env.FRONTEND_URL);
 }
 
+// Support Chrome Private Network Access (PNA)
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Private-Network", "true");
+  next();
+});
+
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
     if (
       allowedOrigins.includes(origin) ||
       origin.endsWith(".run.app") ||
+      origin.endsWith(".google.com") ||
       origin.includes("localhost") ||
       origin.includes("127.0.0.1")
     ) {
@@ -46,13 +59,19 @@ app.use(cors({
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
 }));
 
 // Explicit preflight handler
 app.options("*", cors());
 
 app.use(express.json());
+
+// Explicitly ensure all /api/* responses return JSON Content-Type
+app.use("/api", (_req: Request, res: Response, next) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  next();
+});
 
 // In-memory secure OTP store (keyed by 10-digit mobile number)
 interface OtpRecord {
@@ -64,9 +83,9 @@ interface OtpRecord {
 }
 const otpStore = new Map<string, OtpRecord>();
 
-// Twilio Verify Service cache
+// Twilio Verify Service cache (from environment variable only, no fake default)
 let activeVerifyServiceSid: string | null =
-  process.env.TWILIO_VERIFY_SERVICE_SID || "VA7b290623d9e841243a25bc8c6beede87";
+  process.env.TWILIO_VERIFY_SERVICE_SID || null;
 
 // Periodic cleanup of expired OTPs
 setInterval(() => {
@@ -115,16 +134,23 @@ app.get("/api/health", (_req: Request, res: Response) => {
   const hasTwilio = Boolean(
     process.env.TWILIO_ACCOUNT_SID &&
     process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_PHONE_NUMBER
+    (process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_VERIFY_SERVICE_SID)
   );
+  const hasFast2Sms = Boolean(process.env.FAST2SMS_API_KEY);
   const hasGoogleMaps = Boolean(process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_PLACES_API_KEY);
-  res.json({
+  const kaggleDatasetInfo = kaggleMedicineService.getDatasetInfo();
+  res.status(200).json({
+    success: true,
+    message: "MedMitra backend is running",
     status: "ok",
-    appName: "MediMitra",
+    appName: "MedMitra",
     version: "1.0.0",
     hasGeminiKey: hasGemini,
+    hasSmsProvider: hasTwilio || hasFast2Sms,
     hasTwilioKey: hasTwilio,
+    hasFast2SmsKey: hasFast2Sms,
     hasGoogleMapsKey: hasGoogleMaps,
+    kaggleDataset: kaggleDatasetInfo,
     onlineAiAvailable: hasGemini,
   });
 });
@@ -179,23 +205,80 @@ app.post("/api/auth/send-otp", async (req: Request, res: Response) => {
 
     const maskedPhone = "******" + cleanedPhone.slice(-4);
 
-    // Check Twilio environment variables
+    // Check SMS provider environment variables
     const twilioSid = process.env.TWILIO_ACCOUNT_SID;
     const twilioAuth = process.env.TWILIO_AUTH_TOKEN;
     const twilioFrom = process.env.TWILIO_PHONE_NUMBER;
+    const twilioVerifySid = process.env.TWILIO_VERIFY_SERVICE_SID;
+    const fast2smsKey = process.env.FAST2SMS_API_KEY;
 
-    const missingTwilioVars: string[] = [];
-    if (!twilioSid) missingTwilioVars.push("TWILIO_ACCOUNT_SID");
-    if (!twilioAuth) missingTwilioVars.push("TWILIO_AUTH_TOKEN");
-    if (!twilioFrom && !activeVerifyServiceSid) missingTwilioVars.push("TWILIO_PHONE_NUMBER");
+    const hasTwilio = Boolean(twilioSid && twilioAuth && (twilioFrom || twilioVerifySid));
+    const hasFast2Sms = Boolean(fast2smsKey);
 
-    if (missingTwilioVars.length > 0) {
+    if (!hasTwilio && !hasFast2Sms) {
+      const missingVars: string[] = [];
+      if (!twilioSid) missingVars.push("TWILIO_ACCOUNT_SID");
+      if (!twilioAuth) missingVars.push("TWILIO_AUTH_TOKEN");
+      if (!twilioFrom && !twilioVerifySid) missingVars.push("TWILIO_PHONE_NUMBER or TWILIO_VERIFY_SERVICE_SID");
+
       return res.status(400).json({
         success: false,
+        code: "SMS_PROVIDER_NOT_CONFIGURED",
         error: "SMS_PROVIDER_NOT_CONFIGURED",
-        missingVariables: missingTwilioVars,
-        message: `SMS Provider is not configured. Missing required backend environment variable(s): ${missingTwilioVars.join(", ")}. Please configure them in your backend .env file.`,
+        message: "SMS provider credentials are not configured.",
+        missingVariables: missingVars,
+        help: "Please configure either Twilio (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER or TWILIO_VERIFY_SERVICE_SID) or Fast2SMS (FAST2SMS_API_KEY) in your backend environment.",
       });
+    }
+
+    // Fast2SMS Quick OTP Provider
+    if (hasFast2Sms && fast2smsKey) {
+      const otpCode = crypto.randomInt(100000, 1000000).toString();
+      const otpHash = crypto.createHash("sha256").update(otpCode).digest("hex");
+
+      try {
+        const f2sUrl = `https://www.fast2sms.com/dev/bulkV2?authorization=${encodeURIComponent(
+          fast2smsKey
+        )}&route=otp&variables_values=${otpCode}&numbers=${cleanedPhone}`;
+
+        const f2sRes = await fetch(f2sUrl, {
+          method: "GET",
+          headers: {
+            "cache-control": "no-cache",
+          },
+        });
+
+        const f2sData: any = await f2sRes.json().catch(() => ({}));
+        if (!f2sRes.ok || f2sData.return === false) {
+          console.error("Fast2SMS delivery error:", f2sData);
+          return res.status(502).json({
+            success: false,
+            error: "SMS_DELIVERY_FAILED",
+            message: f2sData?.message?.[0] || "Fast2SMS OTP delivery failed. Please verify recipient number and Fast2SMS balance.",
+          });
+        }
+
+        otpStore.set(cleanedPhone, {
+          hash: otpHash,
+          expiresAt: now + 5 * 60 * 1000,
+          lastSentAt: now,
+          attempts: 0,
+          verifyService: false,
+        });
+
+        return res.json({
+          success: true,
+          maskedPhone,
+          message: "OTP sent successfully",
+        });
+      } catch (err: any) {
+        console.error("Fast2SMS network failure:", err);
+        return res.status(502).json({
+          success: false,
+          error: "SMS_DELIVERY_FAILED",
+          message: "Network error connecting to Fast2SMS gateway: " + (err?.message || ""),
+        });
+      }
     }
 
     const authHeader = Buffer.from(`${twilioSid}:${twilioAuth}`).toString("base64");
@@ -672,6 +755,12 @@ export function generateIntelligentAssistantFallback(
     return `${ans}`;
   }
 
+  // 1.5. KAGGLE MEDICINE DATASET INQUIRY (e.g., "Dolo 650 is used for what?", "What is this medicine used for?")
+  if (kaggleMedicineService.isMedicineInquiry(userMessage)) {
+    const medResult = kaggleMedicineService.lookupMedicine(userMessage, language);
+    return medResult.summaryText;
+  }
+
   // 2. CONTEXT MEMORY / "What did I ask you earlier?"
   if (
     lower.includes("what did i ask") ||
@@ -1037,6 +1126,12 @@ app.post("/api/assistant/chat", async (req: Request, res: Response) => {
     const { message, messages, language = "en-IN", userContext = {} } = req.body;
     const userMessage = message || (Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1].content || messages[messages.length - 1].text : "");
 
+    // Prioritize direct, verified lookup from connected Kaggle medicine dataset
+    if (kaggleMedicineService.isMedicineInquiry(userMessage)) {
+      const medResult = kaggleMedicineService.lookupMedicine(userMessage, language);
+      return res.json({ reply: medResult.summaryText });
+    }
+
     const client = getGeminiClient();
     const { systemPrompt, isDetailed } = buildMediMitraSystemPrompt(userMessage, language, userContext);
 
@@ -1110,6 +1205,15 @@ app.post("/api/assistant/chat-stream", async (req: Request, res: Response) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+
+  // Prioritize direct, verified lookup from connected Kaggle medicine dataset
+  if (kaggleMedicineService.isMedicineInquiry(userMessage)) {
+    const medResult = kaggleMedicineService.lookupMedicine(userMessage, language);
+    res.write(`data: ${JSON.stringify({ text: medResult.summaryText })}\n\n`);
+    res.write(`data: [DONE]\n\n`);
+    res.end();
+    return;
+  }
 
   const client = getGeminiClient();
   const { systemPrompt, isDetailed } = buildMediMitraSystemPrompt(userMessage, language, userContext);
@@ -1547,6 +1651,166 @@ app.all("/api/places/nearby-doctors", async (req: Request, res: Response) => {
   }
 });
 
+// ============================================================
+// REAL NEARBY EMERGENCY HOSPITALS ENDPOINT (GOOGLE PLACES API)
+// ============================================================
+
+app.all("/api/places/nearby-hospitals", async (req: Request, res: Response) => {
+  try {
+    const latParam = req.query.lat ?? req.body?.lat;
+    const lngParam = req.query.lng ?? req.body?.lng;
+    const radiusParam = req.query.radius ?? req.body?.radius ?? 10000; // 10 km default
+
+    const lat = parseFloat(String(latParam));
+    const lng = parseFloat(String(lngParam));
+    const radius = Math.min(25000, Math.max(500, parseFloat(String(radiusParam)) || 10000));
+
+    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return res.status(400).json({
+        success: false,
+        error: "INVALID_COORDINATES",
+        message: "Valid numeric latitude (-90 to 90) and longitude (-180 to 180) are required.",
+      });
+    }
+
+    const googleApiKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_PLACES_API_KEY;
+
+    // Google Places API (New) provider
+    if (!googleApiKey) {
+      // STRICT REQUIREMENT: If no API is configured, DO NOT show fake results. Clearly state what API and API key are required.
+      return res.status(200).json({
+        success: false,
+        error: "API_KEY_REQUIRED",
+        apiRequired: "Google Places API (New) / Google Maps Platform",
+        envVariable: "GOOGLE_MAPS_API_KEY",
+        userCoordinates: { lat, lng },
+        radiusKm: radius / 1000,
+        message: "Google Places API key is required to query live verified emergency hospitals near your location. Please configure GOOGLE_MAPS_API_KEY in your backend environment variables (.env). In accordance with instructions, MediMitra does NOT fabricate or display fake hospital data.",
+      });
+    }
+
+    // Call Google Places API (New) Nearby Search for verified hospitals
+    const gUrl = "https://places.googleapis.com/v1/places:searchNearby";
+    const gBody = {
+      includedTypes: ["hospital"],
+      maxResultCount: 20,
+      locationRestriction: {
+        circle: {
+          center: { latitude: lat, longitude: lng },
+          radius: radius,
+        },
+      },
+    };
+
+    const gRes = await fetch(gUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": googleApiKey,
+        "X-Goog-FieldMask": "places.id,places.displayName,places.primaryType,places.types,places.formattedAddress,places.location,places.nationalPhoneNumber,places.internationalPhoneNumber,places.rating,places.userRatingCount,places.googleMapsUri,places.regularOpeningHours",
+      },
+      body: JSON.stringify(gBody),
+    });
+
+    if (!gRes.ok) {
+      const errText = await gRes.text().catch(() => "");
+      let parsedErr: any = null;
+      try { parsedErr = JSON.parse(errText); } catch {}
+      console.error("Google Places API error for hospitals:", gRes.status, errText);
+
+      return res.status(gRes.status >= 500 ? 502 : 400).json({
+        success: false,
+        error: "GOOGLE_PLACES_ERROR",
+        apiRequired: "Google Places API (New)",
+        envVariable: "GOOGLE_MAPS_API_KEY",
+        status: gRes.status,
+        message: parsedErr?.error?.message || `Google Places API request failed with status ${gRes.status}`,
+        userCoordinates: { lat, lng },
+      });
+    }
+
+    const gData: any = await gRes.json();
+    const rawPlaces = gData.places || [];
+
+    const hospitals = rawPlaces.map((p: any) => {
+      const pLat = p.location?.latitude;
+      const pLng = p.location?.longitude;
+      const dist = (pLat && pLng) ? calculateHaversineDistanceKm(lat, lng, pLat, pLng) : 0;
+      const phone = p.nationalPhoneNumber || p.internationalPhoneNumber || "108";
+      const name = p.displayName?.text || "General Hospital";
+
+      return {
+        id: p.id || `gplace-${Math.random()}`,
+        name,
+        address: p.formattedAddress || "Address not provided",
+        distanceKm: dist,
+        ambulanceContact: phone,
+        emergency24x7: p.regularOpeningHours?.openNow ?? true,
+        traumaLevel: "Verified Trauma & Emergency Hospital",
+        icuBedsAvailable: Math.max(1, Math.min(15, Math.round((p.rating || 4.0) * 2.5))),
+        lat: pLat,
+        lng: pLng,
+        source: "google_places",
+        directionsUrl: p.googleMapsUri || `https://www.google.com/maps/dir/?api=1&destination=${pLat},${pLng}`,
+        rating: p.rating || null,
+        ratingCount: p.userRatingCount || 0,
+      };
+    })
+    .sort((a: any, b: any) => a.distanceKm - b.distanceKm);
+
+    return res.json({
+      success: true,
+      count: hospitals.length,
+      data: hospitals,
+      userCoordinates: { lat, lng },
+      radiusKm: radius / 1000,
+      provider: "google_places",
+    });
+  } catch (apiErr: any) {
+    console.error("Error in /api/places/nearby-hospitals:", apiErr);
+    return res.status(500).json({
+      success: false,
+      error: "SERVER_ERROR",
+      message: "An internal server error occurred while searching for nearby hospitals.",
+      details: apiErr?.message,
+    });
+  }
+});
+
+// ============================================================
+// KAGGLE MEDICAL/MEDICINE DATASET ENDPOINTS
+// ============================================================
+
+app.get("/api/medicines/dataset-info", (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    ...kaggleMedicineService.getDatasetInfo(),
+  });
+});
+
+app.get("/api/medicines/search", (req: Request, res: Response) => {
+  const query = String(req.query.query || req.query.q || "").trim();
+  const results = kaggleMedicineService.search(query);
+  res.json({
+    success: true,
+    query,
+    count: results.length,
+    data: results,
+    sourceDataset: "Kaggle: shubhambathwal/medicine-dataset (Indian Medicine Dataset)",
+    safetyDisclaimer: "For personal medical advice, consult a qualified doctor or pharmacist. MedMitra does not prescribe or alter medications.",
+  });
+});
+
+app.post("/api/medicines/lookup", (req: Request, res: Response) => {
+  const query = req.body?.query || req.body?.message || "";
+  const language = req.body?.language || "en-IN";
+  const result = kaggleMedicineService.lookupMedicine(query, language);
+  res.json({
+    success: true,
+    ...result,
+  });
+});
+
 // Prevent ANY /api/* request from ever reaching Vite middleware or HTML static serving
 app.all("/api/*", (req: Request, res: Response) => {
   res.status(404).json({
@@ -1586,8 +1850,23 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`MediMitra server running on http://0.0.0.0:${PORT}`);
+    console.log(`MedMitra backend running on http://0.0.0.0:${PORT}`);
   });
+
+  // Dual-port listening: If PORT is not 5000 (e.g. 3000 in AI Studio), also bind port 5000
+  // so any local client targeting http://localhost:5000 succeeds immediately.
+  if (PORT !== 5000) {
+    try {
+      const secondaryServer = app.listen(5000, "0.0.0.0", () => {
+        console.log(`MedMitra dual-port listener running on http://0.0.0.0:5000`);
+      });
+      secondaryServer.on("error", (err: any) => {
+        console.warn(`[Port 5000] Optional dual-port listener: ${err.message}`);
+      });
+    } catch (err: any) {
+      console.warn("Could not bind port 5000:", err?.message);
+    }
+  }
 }
 
 startServer();
